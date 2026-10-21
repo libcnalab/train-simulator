@@ -10,6 +10,8 @@
 #include "trainsim/sim/RouteSimulation.hpp"
 #include "trainsim/world/StreamingWorld.hpp"
 
+#include "CnaEngine/Graphics/Camera.hpp"
+
 #include "Microsoft/Xna/Framework/Game.hpp"
 #include "Microsoft/Xna/Framework/GraphicsDeviceManager.hpp"
 #include "Microsoft/Xna/Framework/Graphics/SpriteBatch.hpp"
@@ -171,6 +173,8 @@ private:
     float playerPitch_ = 0.0f;
     float cameraLongitudinalLean_ = 0.0f;
     float cameraLongitudinalOffset_ = 0.0f;
+    // The passenger's eye (or the audit pose) and lens, set every frame.
+    CnaEngine::Graphics::Camera camera_;
     float conductorInfoRemaining_ = 0.0f;
     double elapsedSeconds_ = 0.0;
     double passengerDoorsOpenRealSeconds_ = 0.0;

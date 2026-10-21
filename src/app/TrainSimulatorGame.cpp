@@ -2204,7 +2204,6 @@ void TrainSimulatorGame::Draw(const GameTime& gameTime)
             + forward.Y*leanAxisDotUp*oneMinusCosine,
         suspensionUp.Z*leanCosine + leanAxisCrossUp.Z*leanSine
             + forward.Z*leanAxisDotUp*oneMinusCosine};
-    Matrix view = Matrix::CreateLookAt(eye, eye + forward, cameraUp);
     if(options_.auditCamera)
     {
         const auto& p=*options_.auditCamera;
@@ -2212,11 +2211,13 @@ void TrainSimulatorGame::Draw(const GameTime& gameTime)
         const float yaw=p[3]*kPi/180.0f,pitch=p[4]*kPi/180.0f;
         const Vector3 look{std::cos(pitch)*std::sin(yaw),std::sin(pitch),
                             -std::cos(pitch)*std::cos(yaw)};
-        view=Matrix::CreateLookAt(auditEye,auditEye+look,Vector3::Up);
+        camera_.SetLookAt(auditEye,auditEye+look,Vector3::Up);
     }
+    else
+        camera_.SetLookAt(eye, eye + forward, cameraUp);
     const float fieldOfView = settings_.fieldOfViewDegrees * kPi / 180.0f;
-    const Matrix projection = Matrix::CreatePerspectiveFieldOfView(fieldOfView, aspect, 0.06f, 1'100.0f);
-    renderStats_ = scene_->draw(view,projection,route_,service_.state(),streaming_,passengers_,
+    camera_.SetPerspective(fieldOfView, aspect, 0.06f, 1'100.0f);
+    renderStats_ = scene_->draw(camera_.View(),camera_.Projection(),route_,service_.state(),streaming_,passengers_,
                                 elapsedSeconds_,
                                 service_.estimatedSecondsToNextStation(),
                                 service_.predictedScheduleDeviationSeconds(),
