@@ -1,6 +1,7 @@
 #include "trainsim/render/ProceduralMaterials.hpp"
 
-#include "Microsoft/Xna/Framework/Graphics/SurfaceFormat.hpp"
+#include "CnaEngine/Graphics/Image.hpp"
+
 #include "Microsoft/Xna/Framework/Graphics/Texture2D.hpp"
 
 #include <algorithm>
@@ -321,38 +322,27 @@ std::uint32_t texelHash(int x, int y, std::uint32_t seed) noexcept
 
 } // namespace
 
+namespace {
+// Mip levels and uploads are cna-engine's (Graphics/Image.hpp): the same truncating 2x2 box
+// filter and alpha-test coverage this file used to implement.
+CnaEngine::Graphics::Image engineImage(const ProceduralImage& image,const char* what)
+{
+    if (image.width <= 0 || image.height <= 0
+        || image.pixels.size() != static_cast<std::size_t>(image.width*image.height))
+        throw std::invalid_argument(what);
+    return CnaEngine::Graphics::Image::FromColors(image.width,image.height,image.pixels);
+}
+
+ProceduralImage proceduralImage(const CnaEngine::Graphics::Image& image)
+{
+    return ProceduralImage{image.Width(),image.Height(),image.ToColors()};
+}
+}
+
 ProceduralImage ProceduralImage::downsampled() const
 {
-    if (width <= 0 || height <= 0
-        || pixels.size() != static_cast<std::size_t>(width * height))
-        throw std::invalid_argument("Cannot downsample an invalid procedural image");
-
-    ProceduralImage result;
-    result.width = std::max(1,width/2);
-    result.height = std::max(1,height/2);
-    result.pixels.resize(static_cast<std::size_t>(result.width*result.height));
-    for (int y = 0; y < result.height; ++y)
-        for (int x = 0; x < result.width; ++x)
-        {
-            int red = 0;
-            int green = 0;
-            int blue = 0;
-            int alpha = 0;
-            for (int offsetY = 0; offsetY < 2; ++offsetY)
-                for (int offsetX = 0; offsetX < 2; ++offsetX)
-                {
-                    const int sourceX = std::min(width-1,x*2+offsetX);
-                    const int sourceY = std::min(height-1,y*2+offsetY);
-                    const Color& color = pixels[static_cast<std::size_t>(sourceY*width+sourceX)];
-                    red += color.getRProperty();
-                    green += color.getGProperty();
-                    blue += color.getBProperty();
-                    alpha += color.getAProperty();
-                }
-            result.pixels[static_cast<std::size_t>(y*result.width+x)] =
-                Color(red/4,green/4,blue/4,alpha/4);
-        }
-    return result;
+    return proceduralImage(CnaEngine::Graphics::Downsample(
+        engineImage(*this,"Cannot downsample an invalid procedural image")));
 }
 
 ProceduralImage ProceduralImage::downsampledForAlphaTest(int referenceAlpha,double coverage) const
@@ -360,28 +350,8 @@ ProceduralImage ProceduralImage::downsampledForAlphaTest(int referenceAlpha,doub
     if (referenceAlpha<1 || referenceAlpha>254 || !std::isfinite(coverage)
         || coverage<0 || coverage>1)
         throw std::invalid_argument("Invalid alpha-test coverage target");
-    auto result=downsampled();
-    const auto covered=[&](double scale) {
-        return static_cast<double>(std::count_if(result.pixels.begin(),result.pixels.end(),
-            [&](const Color& pixel) { return pixel.getAProperty()*scale>=referenceAlpha+1.0; }))
-            /static_cast<double>(result.pixels.size());
-    };
-    double best=1, error=std::abs(covered(1)-coverage), low=0, high=8;
-    // Coverage is a step function. Retain the closest attainable result rather than blindly
-    // taking one binary-search endpoint, particularly for tiny final mip levels.
-    for (int iteration=0;iteration<24;++iteration)
-    {
-        const double scale=(low+high)*0.5;
-        const double current=covered(scale);
-        const double difference=std::abs(current-coverage);
-        if (difference<error) { best=scale; error=difference; }
-        if (current<coverage) low=scale;
-        else high=scale;
-    }
-    for (auto& pixel:result.pixels)
-        pixel.setAProperty(static_cast<std::uint8_t>(std::clamp(
-            static_cast<int>(pixel.getAProperty()*best),0,255)));
-    return result;
+    return proceduralImage(CnaEngine::Graphics::DownsampleForAlphaTest(
+        engineImage(*this,"Cannot downsample an invalid procedural image"),referenceAlpha,coverage));
 }
 
 ProceduralImage makeTerrainDetailImage(int size)
@@ -836,25 +806,10 @@ ProceduralImage makeRenderedFacadeDetailImage(int size)
 std::unique_ptr<Texture2D> uploadMipmappedTexture(GraphicsDevice& device,
                                                   const ProceduralImage& image,int alphaTestReference)
 {
-    if (image.width <= 0 || image.height <= 0
-        || image.pixels.size() != static_cast<std::size_t>(image.width*image.height))
-        throw std::invalid_argument("Cannot upload an invalid procedural image");
-
-    auto texture = std::make_unique<Texture2D>(
-        device,image.width,image.height,true,SurfaceFormat::Color);
-    ProceduralImage level = image;
-    const double coverage=static_cast<double>(std::count_if(image.pixels.begin(),image.pixels.end(),
-        [&](const Color& pixel) { return pixel.getAProperty()>alphaTestReference; }))
-        /static_cast<double>(image.pixels.size());
-    for (int mip = 0; mip < texture->getLevelCountProperty(); ++mip)
-    {
-        texture->SetData(mip,nullptr,level.pixels.data(),0,
-                         static_cast<int>(level.pixels.size()));
-        if (level.width == 1 && level.height == 1) break;
-        level = alphaTestReference<0 ? level.downsampled()
-            : level.downsampledForAlphaTest(alphaTestReference,coverage);
-    }
-    return texture;
+    CnaEngine::Graphics::MipOptions options;
+    if (alphaTestReference >= 0) options.alphaTestReference = alphaTestReference;
+    return CnaEngine::Graphics::UploadTexture(
+        device,engineImage(image,"Cannot upload an invalid procedural image"),options);
 }
 
 } // namespace TrainSim::Render
