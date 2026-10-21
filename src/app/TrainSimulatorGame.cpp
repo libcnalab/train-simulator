@@ -4,8 +4,6 @@
 #include "trainsim/sim/Environment.hpp"
 #include "trainsim/sim/TrainInterior.hpp"
 
-#include "CnaEngine/Graphics/ScreenCapture.hpp"
-
 #include "Microsoft/Xna/Framework/Color.hpp"
 #include "Microsoft/Xna/Framework/GameTime.hpp"
 #include "Microsoft/Xna/Framework/GameWindow.hpp"
@@ -52,6 +50,12 @@ constexpr float kMouseLookPlatformScale = 2.5f;
 #else
 constexpr float kMouseLookPlatformScale = 1.0f;
 #endif
+
+// A step in seconds, capped so a long stall never advances the simulation in one huge jump.
+float clampedSeconds(const System::TimeSpan& step)
+{
+    return std::clamp(static_cast<float>(step.getTotalSecondsProperty()),0.0f,0.10f);
+}
 
 std::string speedText(double metresPerSecond)
 {
@@ -174,7 +178,7 @@ TrainSimulatorGame::TrainSimulatorGame(LaunchOptions options)
     setTargetElapsedTimeProperty(System::TimeSpan::FromTicks(166667));
     // Lockstep uses CNA's variable-step loop for one Update per Draw; stepSeconds() then gives
     // every step the fixed-step duration instead of the measured one.
-    setIsFixedTimeStepProperty(options_.fixedTimeStep && !options_.lockstep);
+    setIsFixedTimeStepProperty(options_.fixedTimeStep && !options_.run.lockstep);
     bindControls();
     showHelp_ = options_.startWithHelp;
     showMap_ = options_.startWithMap;
@@ -184,8 +188,7 @@ TrainSimulatorGame::TrainSimulatorGame(LaunchOptions options)
     paused_ = options_.startPaused;
     // An interactive launch opens on the start menu. Every automated run (finite frames, timed
     // runs, screenshots and the interaction smoke) keeps starting directly aboard the train.
-    startMenu_ = options_.frameLimit == 0 && options_.runSeconds == 0.0
-        && options_.screenshotPath.empty() && !options_.interactionSmoke;
+    startMenu_ = !options_.run.Automated() && !options_.interactionSmoke;
     if (options_.startAtSignal)
         service_.teleportToRouteDistance(220.0,1);
     else if (options_.startRouteKilometres.has_value())
@@ -709,7 +712,7 @@ TrainSimulatorGame::~TrainSimulatorGame()
                          cameraLongitudinalLean_*180.0f/kPi*1'000.0f)
                   << " camera_suspension_mm=" << std::lround(
                          cameraLongitudinalOffset_*1'000.0f)
-                  << " screenshot_saved=" << (screenshotSaved_ ? 1 : 0)
+                  << " screenshot_saved=" << (run_.Screenshot() && run_.Screenshot()->success ? 1 : 0)
                   << " foliage_material_triangles=" << renderStats_.foliageMaterialTriangles
                   << " vsync_requested=" << options_.verticalSyncEnabled
                   << " fixed_time_step=" << options_.fixedTimeStep
@@ -1163,10 +1166,10 @@ void TrainSimulatorGame::runInteractionSmoke()
             playerZ_ = 5.70f;
             require(playerInsideToilet(), "player did not enter toilet volume");
             require(canOccupy(playerX_, playerZ_), "open toilet interior rejected the player");
-            interactionSmokeRenderCheckpoint_ = framesDrawn_;
+            interactionSmokeRenderCheckpoint_ = run_.FramesDrawn();
             break;
         case 5:
-            if (framesDrawn_ <= interactionSmokeRenderCheckpoint_)
+            if (run_.FramesDrawn() <= interactionSmokeRenderCheckpoint_)
             {
                 --interactionSmokeStage_;
                 break;
@@ -1177,11 +1180,11 @@ void TrainSimulatorGame::runInteractionSmoke()
             playerYaw_ = 0.0f;
             interact();
             require(!toiletDoorOpen_, "toilet door did not close from inside");
-            interactionSmokeRenderCheckpoint_ = framesDrawn_;
+            interactionSmokeRenderCheckpoint_ = run_.FramesDrawn();
             break;
         case 6:
         {
-            if (framesDrawn_ <= interactionSmokeRenderCheckpoint_)
+            if (run_.FramesDrawn() <= interactionSmokeRenderCheckpoint_)
             {
                 --interactionSmokeStage_;
                 break;
@@ -1350,14 +1353,12 @@ void TrainSimulatorGame::runInteractionSmoke()
 
 float TrainSimulatorGame::stepSeconds(const GameTime& gameTime)
 {
-    const auto& step = options_.lockstep ? getTargetElapsedTimeProperty()
-                                         : gameTime.getElapsedGameTimeProperty();
-    return std::clamp(static_cast<float>(step.getTotalSecondsProperty()),0.0f,0.10f);
+    return clampedSeconds(options_.run.lockstep ? getTargetElapsedTimeProperty()
+                                                : gameTime.getElapsedGameTimeProperty());
 }
 
 void TrainSimulatorGame::Update(GameTime& gameTime)
 {
-    const float dt = stepSeconds(gameTime);
     const KeyboardState keyboard = Keyboard::GetState();
     const MouseState mouse = Mouse::GetState();
     updateControls(keyboard, mouse);
@@ -1365,7 +1366,7 @@ void TrainSimulatorGame::Update(GameTime& gameTime)
     // A finite QA run freezes its authoritative state once the requested frame has been drawn,
     // but may need a few additional render-only frames to let CNA's asynchronous avatar loader
     // become idle. This preserves --frames semantics while avoiding teardown during a load.
-    if (finishingAvatarWarmup_)
+    if (run_.LimitReached())
     {
         previousMouse_ = mouse;
         Game::Update(gameTime);
@@ -1490,6 +1491,11 @@ void TrainSimulatorGame::Update(GameTime& gameTime)
 
     if (!paused_)
     {
+        // The run counts simulated time towards --run-seconds. In lockstep CNA's variable-step loop
+        // gives exactly one Update per Draw, each of the fixed 1/60 s.
+        const float dt = static_cast<float>(run_.BeginUpdate(
+            clampedSeconds(gameTime.getElapsedGameTimeProperty()),
+            clampedSeconds(getTargetElapsedTimeProperty())).value_or(0.0));
         updatePlayer(dt, keyboard, mouse);
         conductorInfoRemaining_ = std::max(0.0f, conductorInfoRemaining_ - dt);
         const float seatedTarget = seated_ ? 1.0f : 0.0f;
@@ -1548,7 +1554,7 @@ void TrainSimulatorGame::Update(GameTime& gameTime)
         if (options_.interactionSmoke) runInteractionSmoke();
     }
 
-    if (options_.reportState && options_.frameLimit == 0)
+    if (options_.reportState && options_.run.frames == 0)
     {
         const auto now=std::chrono::steady_clock::now();
         if (now-lastInputTrace_ >= std::chrono::seconds(5))
@@ -1577,7 +1583,7 @@ void TrainSimulatorGame::Update(GameTime& gameTime)
                       << " yaw_rad=" << playerYaw_ << " pitch_rad=" << playerPitch_
                       << " x=" << playerX_ << " z=" << playerZ_
                       << " help=" << showHelp_ << " display=" << inspectDisplay_
-                      << " frames=" << framesDrawn_
+                      << " frames=" << run_.FramesDrawn()
                       << " trace_interval_s=" << traceIntervalSeconds
                       << " elapsed_s=" << elapsedSeconds_
                       << " route_km=" << service_.state().routeDistanceMetres/1000.0
@@ -1833,7 +1839,7 @@ void TrainSimulatorGame::drawUi()
     // A visible desktop launch begins with a free cursor. Give a first-time passenger the one
     // action needed to enter first-person control without leaving this permanently on screenshots
     // and automated smoke runs, all of which use a finite frame limit.
-    if (!mouseCaptured_ && options_.frameLimit == 0 && !paused_ && !showMap_ && !showHelp_
+    if (!mouseCaptured_ && options_.run.frames == 0 && !paused_ && !showMap_ && !showHelp_
         && !inspectDisplay_ && conductorInfoRemaining_ <= 0.0f)
     {
         drawPanel(width-302,18,284,72,Color(7,21,29,218));
@@ -2098,34 +2104,22 @@ void TrainSimulatorGame::drawUi()
     spriteBatch_->End();
 }
 
-void TrainSimulatorGame::captureScreenshot(const std::string& path)
-{
-    // cna-engine reads the back buffer as bytes (CNA's Color is a polymorphic packed-vector type
-    // four times their size), which keeps screenshot peak memory bounded during automated
-    // visual QA, and writes the PNG.
-    const auto capture = CnaEngine::Graphics::CaptureBackBuffer(getGraphicsDeviceProperty(), {.path = path});
-    if (!capture.success) throw std::runtime_error("Screenshot failed: " + capture.error);
-    screenshotSaved_ = true;
-}
-
 void TrainSimulatorGame::Draw(const GameTime& gameTime)
 {
     auto& device = getGraphicsDeviceProperty();
-    // Capture the previous completed frame after CNA's normal EndDraw/Present boundary. Reading
-    // the current back buffer before that boundary is intermittent on EasyGL's offscreen path.
-    // Freeze simulation at the requested frame, but keep drawing until the complete quality-sized
-    // avatar pool has crossed its first GPU-upload boundary. This prevents deterministic gallery
-    // cameras from photographing an otherwise valid station before its people are ready.
-    if (screenshotPending_ && scene_->avatarLoadingComplete())
+    // cna-engine's AutomatedRun freezes the simulation at the requested frame but keeps drawing
+    // until the complete quality-sized avatar pool has crossed its first GPU-upload boundary, so
+    // deterministic gallery cameras never photograph an otherwise valid station before its people
+    // are ready. It then reads the screenshot from that completed frame here, after CNA's normal
+    // EndDraw/Present boundary (reading the back buffer before it is intermittent on EasyGL's
+    // offscreen path), as bytes, which keeps screenshot peak memory bounded.
+    if (run_.BeginDraw(device))
     {
-        captureScreenshot(options_.screenshotPath);
-        screenshotPending_ = false;
-        if (scene_->avatarLoadingComplete())
-        {
-            Exit();
-            Game::Draw(gameTime);
-            return;
-        }
+        if (const auto& screenshot = run_.Screenshot(); screenshot && !screenshot->success)
+            throw std::runtime_error("Screenshot failed: " + screenshot->error);
+        Exit();
+        Game::Draw(gameTime);
+        return;
     }
     if (startMenu_)
     {
@@ -2134,7 +2128,7 @@ void TrainSimulatorGame::Draw(const GameTime& gameTime)
         return;
     }
     const auto wallNow = std::chrono::steady_clock::now();
-    const bool steady = framesDrawn_ >= 180 && scene_->avatarLoadingComplete();
+    const bool steady = run_.FramesDrawn() >= 180 && scene_->avatarLoadingComplete();
     if (previousDrawTime_.time_since_epoch().count() != 0)
     {
         const double interval = std::chrono::duration<double,std::milli>(wallNow-previousDrawTime_).count();
@@ -2256,19 +2250,7 @@ void TrainSimulatorGame::Draw(const GameTime& gameTime)
                                 options_.auditCamera ? (*options_.auditCamera)[3]*kPi/180.0f : cameraYaw);
     drawUi();
 
-    ++framesDrawn_;
-    const bool durationReached=options_.runSeconds>0.0 && elapsedSeconds_>=options_.runSeconds;
-    const bool captureFrameReached = durationReached || (options_.frameLimit == 0
-        ? options_.runSeconds==0.0 && framesDrawn_>=1 : framesDrawn_>=options_.frameLimit);
-    if (captureFrameReached
-        && (options_.frameLimit>0 || options_.runSeconds>0.0 || !options_.screenshotPath.empty()))
-    {
-        finishingAvatarWarmup_ = true;
-        if (!options_.screenshotPath.empty() && !screenshotSaved_)
-            screenshotPending_ = true;
-        else if (scene_->avatarLoadingComplete())
-            Exit();
-    }
+    run_.EndDraw(scene_->avatarLoadingComplete());
     Game::Draw(gameTime);
 }
 

@@ -2,6 +2,7 @@
 #include "trainsim/sim/Environment.hpp"
 
 #include "CnaEngine/Core/SettingsFile.hpp"
+#include "CnaEngine/Graphics/AutomatedRun.hpp"
 
 #include <array>
 #include <cmath>
@@ -11,6 +12,8 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace {
 
@@ -75,14 +78,19 @@ int main(int argc, char** argv)
     TrainSim::App::LaunchOptions options;
     try
     {
+        const std::vector<std::string_view> arguments(argv, argv + argc);
         for (int index = 1; index < argc; ++index)
         {
+            // --frames, --run-seconds, --screenshot and --lockstep are cna-engine's automated-run
+            // options; it rejects a missing, negative or non-finite value.
+            std::size_t position = static_cast<std::size_t>(index);
+            if (CnaEngine::Graphics::ParseAutomatedRunOption(arguments, position, options.run))
+            {
+                index = static_cast<int>(position);
+                continue;
+            }
             const std::string argument = argv[index];
-            if (argument == "--frames" && index + 1 < argc)
-                options.frameLimit = std::stoi(argv[++index]);
-            else if (argument == "--run-seconds" && index + 1 < argc)
-                options.runSeconds = std::stod(argv[++index]);
-            else if (argument == "--time-scale" && index + 1 < argc)
+            if (argument == "--time-scale" && index + 1 < argc)
                 options.timeScale = std::stod(argv[++index]);
             else if (argument == "--audit-camera" && index + 5 < argc)
             {
@@ -112,8 +120,6 @@ int main(int argc, char** argv)
                 options.verticalSyncEnabled = false;
             else if (argument == "--variable-step")
                 options.fixedTimeStep = false;
-            else if (argument == "--lockstep")
-                options.lockstep = true;
             else if (argument == "--facade-control")
                 options.facadeLightingMode = 1;
             else if (argument == "--linear-facades")
@@ -148,8 +154,6 @@ int main(int argc, char** argv)
                 options.assetDirectory = argv[++index];
             else if (argument == "--config" && index + 1 < argc)
                 options.userConfigFile = argv[++index];
-            else if (argument == "--screenshot" && index + 1 < argc)
-                options.screenshotPath = argv[++index];
             else if (argument == "--station" && index + 1 < argc)
             {
                 const int station = std::stoi(argv[++index]);
@@ -238,10 +242,6 @@ int main(int argc, char** argv)
                 return 2;
             }
         }
-        if (options.frameLimit < 0)
-            throw std::invalid_argument("--frames must not be negative");
-        if (!std::isfinite(options.runSeconds) || options.runSeconds<0.0)
-            throw std::invalid_argument("--run-seconds must be finite and non-negative");
         if (!std::isfinite(options.timeScale) || options.timeScale <= 0.0
             || options.timeScale > 5'000.0)
             throw std::invalid_argument("--time-scale must be greater than zero and at most 5000");
@@ -280,7 +280,7 @@ int main(int argc, char** argv)
                 "are mutually exclusive");
         if (options.auditCamera)
         {
-            if (options.frameLimit <= 0 || options.screenshotPath.empty())
+            if (options.run.frames <= 0 || options.run.screenshotPath.empty())
                 throw std::invalid_argument("--audit-camera requires --frames and --screenshot");
             for (float value : *options.auditCamera)
                 if (!std::isfinite(value) || std::abs(value) > 1000)

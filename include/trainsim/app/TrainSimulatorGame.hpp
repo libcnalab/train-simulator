@@ -10,6 +10,7 @@
 #include "trainsim/sim/RouteSimulation.hpp"
 #include "trainsim/world/StreamingWorld.hpp"
 
+#include "CnaEngine/Graphics/AutomatedRun.hpp"
 #include "CnaEngine/Graphics/Camera.hpp"
 #include "CnaEngine/Input/ActionMap.hpp"
 
@@ -36,8 +37,9 @@ struct LaunchOptions
 {
     std::filesystem::path assetDirectory;
     std::filesystem::path userConfigFile;
-    int frameLimit = 0;
-    double runSeconds = 0.0;
+    // --frames, --run-seconds, --screenshot and --lockstep (one 1/60 s step per drawn frame,
+    // however long the frame took, so the same arguments give the same pictures).
+    CnaEngine::Graphics::AutomatedRunOptions run;
     std::optional<std::array<float,5>> auditCamera;
     double timeScale = 2.4;
     bool startWithHelp = false;
@@ -51,9 +53,6 @@ struct LaunchOptions
     bool avatarRenderingEnabled = true;
     bool verticalSyncEnabled = true;
     bool fixedTimeStep = true;
-    // One 1/60 s step per drawn frame, however long the frame took, so the same arguments give
-    // the same pictures (fixed-step catch-up otherwise runs a timing-dependent number of steps).
-    bool lockstep = false;
     int facadeLightingMode = 0;
     bool reportState = false;
     bool interactionSmoke = false;
@@ -68,7 +67,6 @@ struct LaunchOptions
     bool startAtSunlight = false;
     bool startAtPassenger = false;
     bool startAtSignal = false;
-    std::string screenshotPath;
     std::optional<std::size_t> startStation;
     std::optional<double> startRouteKilometres;
     std::optional<int> startDirection;
@@ -121,7 +119,6 @@ private:
     void drawText(const std::string& text, float x, float y,
                   const Microsoft::Xna::Framework::Color& color,
                   float scale = 2.0f);
-    void captureScreenshot(const std::string& path);
     [[nodiscard]] std::string interactionPrompt() const;
 
     LaunchOptions options_;
@@ -196,11 +193,9 @@ private:
     std::chrono::steady_clock::time_point previousDrawTime_{};
     std::chrono::steady_clock::time_point frameRateWindowStart_{};
     int frameRateWindowFrames_ = 0;
-    int framesDrawn_ = 0;
+    // Frame and time limits, the frozen simulation at the limit and the final screenshot.
+    CnaEngine::Graphics::AutomatedRun run_{options_.run};
     int appliedMultisampleCount_ = 0;
-    bool screenshotSaved_ = false;
-    bool screenshotPending_ = false;
-    bool finishingAvatarWarmup_ = false;
     int interactionSmokeStage_ = 0;
     int interactionSmokeRenderCheckpoint_ = -1;
     Render::RenderStats renderStats_;
