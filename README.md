@@ -264,16 +264,22 @@ safely and the newly selected station starts a fresh exchange on its own platfor
 - A C++23 compiler
 - system `ccache`
 - Python 3 when building the test suite or regenerating audio assets
-- sibling checkouts of CNA `next` and sharp-runtime `next`
+- sibling checkouts of CNA `next`, sharp-runtime `next` and
+  [cna-engine](https://github.com/libcna/cna-engine) `develop`
 
 The expected checkout layout is:
 
 ```text
 parent/
   cna/
+  cna-engine/
   sharp-runtime/
   train-simulator/
 ```
+
+Other locations are passed as `-DTRAINSIM_CNA_ROOT=`, `-DTRAINSIM_SHARP_RUNTIME_ROOT=` and
+`-DTRAINSIM_CNA_ENGINE_ROOT=`. The game uses cna-engine's strict modules (XNA 4.0 types only), which
+need CNA built as a static library; the build forces `CNA_SHARED_LIBRARY=OFF`.
 
 The native build uses CNA's OpenGL 3.3 renderer. An Emscripten build uses CNA's WebGL 2 renderer;
 mobile, macOS-specific work, Vulkan, DirectX, and other renderers are out of scope.

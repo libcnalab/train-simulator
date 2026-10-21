@@ -35,8 +35,10 @@ set(TRAINSIM_CNA_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../cna" CACHE PATH
     "Path to the CNA next-branch checkout")
 set(TRAINSIM_SHARP_RUNTIME_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../sharp-runtime" CACHE PATH
     "Path to the sharp-runtime next-branch checkout")
+set(TRAINSIM_CNA_ENGINE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../cna-engine" CACHE PATH
+    "Path to the cna-engine checkout (strict modules only)")
 
-foreach(_dependency IN ITEMS TRAINSIM_CNA_ROOT TRAINSIM_SHARP_RUNTIME_ROOT)
+foreach(_dependency IN ITEMS TRAINSIM_CNA_ROOT TRAINSIM_SHARP_RUNTIME_ROOT TRAINSIM_CNA_ENGINE_ROOT)
     if(NOT EXISTS "${${_dependency}}/CMakeLists.txt")
         message(FATAL_ERROR "${_dependency} does not name a valid sibling checkout: ${${_dependency}}")
     endif()
@@ -95,6 +97,9 @@ if(TRAINSIM_BUILD_GAME)
     endif()
     set(CNA_ENABLE_VIDEO OFF CACHE STRING "" FORCE)
     set(CNA_ENABLE_DRACO OFF CACHE BOOL "" FORCE)
+    # cna-engine links CNA statically: with a shared CNA the engine's and the game's copies of
+    # CNA's static state would differ.
+    set(CNA_SHARED_LIBRARY OFF CACHE BOOL "Build CNA as one shared library" FORCE)
     set(EASYGL_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(EASYGL_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
     set(METAGL_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -121,6 +126,17 @@ if(TRAINSIM_BUILD_GAME)
         message(FATAL_ERROR "Train Simulator's desktop build requires CNA OpenGL 3.3")
     endif()
 
+    # cna-engine's strict modules (CnaEngine::Core, CnaEngine::Graphics) over the CNA just added:
+    # XNA 4.0 types only. A new compiler warning inside the engine must not break this build.
+    set(CNA_ENGINE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(CNA_ENGINE_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(CNA_ENGINE_WITH_EXTENDED OFF CACHE BOOL "" FORCE)
+    set(CNA_ENGINE_WITH_ENHANCED_GRAPHICS OFF CACHE BOOL "" FORCE)
+    set(CNA_ENGINE_INSTALL OFF CACHE BOOL "" FORCE)
+    set(CNA_ENGINE_PILOT_PROBES OFF CACHE BOOL "" FORCE)
+    set(CNA_ENGINE_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${TRAINSIM_CNA_ENGINE_ROOT}" cna_engine EXCLUDE_FROM_ALL)
+
     add_library(trainsim_render STATIC
         src/audio/TrainAudio.cpp
         src/render/BitmapFont.cpp
@@ -136,7 +152,10 @@ if(TRAINSIM_BUILD_GAME)
         src/render/TrainInteriorBuild.cpp
         src/render/WorldGeometryBuild.cpp)
     target_include_directories(trainsim_render PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-    target_link_libraries(trainsim_render PUBLIC trainsim_core CNA CNA::GamerServices PRIVATE trainsim_warnings)
+    target_link_libraries(trainsim_render PUBLIC trainsim_core CNA CNA::GamerServices CnaEngine::Graphics
+                          PRIVATE trainsim_warnings)
+    # The engine's headers are not written for this project's -Wconversion/-Wshadow set.
+    target_include_directories(trainsim_render SYSTEM PUBLIC "${TRAINSIM_CNA_ENGINE_ROOT}/include")
 
     add_executable(train-simulator
         src/app/Main.cpp

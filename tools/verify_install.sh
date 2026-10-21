@@ -60,15 +60,13 @@ resolved_library() {
     awk -v soname="${soname}" '$1 == soname { print $3; exit }' <<<"${linkage}"
 }
 
-resolved_cna=$(resolved_library libcna.so)
 resolved_sdl=$(resolved_library libSDL3.so.0)
 resolved_mixer=$(resolved_library libSDL3_mixer.so.0)
-expected_cna=$(realpath -- "${install_root}/lib/libcna.so")
 expected_sdl=$(realpath -- "${install_root}/lib/libSDL3.so.0")
 expected_mixer=$(realpath -- "${install_root}/lib/libSDL3_mixer.so.0")
-if [[ -z "${resolved_cna}" ]] \
-    || [[ $(realpath -- "${resolved_cna}") != "${expected_cna}" ]]; then
-    echo "Installed executable did not resolve libcna from its own prefix." >&2
+# cna-engine needs CNA linked statically into the executable.
+if [[ -n "$(resolved_library libcna.so)" ]]; then
+    echo "Installed executable links a shared libcna; CNA must be static." >&2
     printf '%s\n' "${linkage}" >&2
     exit 1
 fi

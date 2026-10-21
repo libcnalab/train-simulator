@@ -489,9 +489,9 @@ all three persistence cases.
 Runtime assets are resolved from the executable's adjacent `assets` directory, the conventional
 installed `share/train-simulator/assets` location, or an explicit override. No compiled absolute
 source-tree path is required, and a separate-working-directory application smoke guards that
-property. The Linux install tree carries `libcna`, the project-local SDL runtime products, and an
-origin-relative runtime search path, so it can be moved as one directory without referring back to
-the build or dependency checkouts. Project, CNA, sharp-runtime, and SDL license texts accompany it.
+property. The Linux install tree carries the project-local SDL runtime products (CNA is linked
+statically, as cna-engine requires) and an origin-relative runtime search path, so it can be moved
+as one directory without referring back to the build or dependency checkouts. Project, CNA, sharp-runtime, and SDL license texts accompany it.
 The installed documentation preserves the repository's `docs/` hierarchy, including the compact
 showcase PNG gallery, so README links remain valid after packaging. The source-only
 `tools/capture_showcase.sh` command recreates those images through production cameras rather than
