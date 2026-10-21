@@ -603,9 +603,9 @@ void SceneRenderer::drawAvatars(const Matrix& view, const Matrix& projection,
                         * Matrix::CreateRotationX(0.15f));
                     const Matrix elbowRest = rotatedBone(bones[elbow],Matrix::CreateRotationX(0.85f));
                     const Matrix wristRest = rotatedBone(bones[wrist],Matrix::getIdentityProperty());
-                    bones[shoulder] = Matrix::Lerp(bones[shoulder],shoulderRest,poseBlend);
-                    bones[elbow] = Matrix::Lerp(bones[elbow],elbowRest,poseBlend);
-                    bones[wrist] = Matrix::Lerp(bones[wrist],wristRest,poseBlend);
+                    bones[shoulder] = blendBone(bones[shoulder],shoulderRest,poseBlend);
+                    bones[elbow] = blendBone(bones[elbow],elbowRest,poseBlend);
+                    bones[wrist] = blendBone(bones[wrist],wristRest,poseBlend);
                 }
             }
             if (seated)

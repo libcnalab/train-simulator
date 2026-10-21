@@ -1151,6 +1151,31 @@ TEST_CASE("passenger head proportions preserve the animated joint and other bone
     TrainSim::Render::applyPassengerProportions({});
 }
 
+TEST_CASE("blended avatar bones stay decomposable through a sit/stand transition")
+{
+    using namespace Microsoft::Xna::Framework;
+    using TrainSim::Render::blendBone;
+    // The stock pose's shoulder clasps the hands behind the back; the lap rest turns it far round.
+    const Matrix native=Matrix::CreateRotationX(-1.9f)*Matrix::CreateRotationY(0.7f)
+        *Matrix::CreateTranslation(0.18f,1.42f,0.02f);
+    const Matrix rest=Matrix::CreateRotationZ(0.22f)*Matrix::CreateRotationX(0.15f)
+        *Matrix::CreateTranslation(native.getTranslationProperty());
+    Vector3 scale, translation;
+    Quaternion rotation;
+    REQUIRE(!Matrix::Lerp(native,rest,0.5f).Decompose(scale,rotation,translation));
+    REQUIRE(blendBone(native,rest,0.0f) == native);
+    REQUIRE(blendBone(native,rest,1.0f) == rest);
+    for (const float amount : {0.1f,0.35f,0.5f,0.65f,0.9f})
+    {
+        const Matrix blended=blendBone(native,rest,amount);
+        REQUIRE(blended.Decompose(scale,rotation,translation));
+        REQUIRE(std::abs(scale.X-1.0f) < 1e-4f);
+        REQUIRE(std::abs(scale.Y-1.0f) < 1e-4f);
+        REQUIRE(std::abs(scale.Z-1.0f) < 1e-4f);
+        REQUIRE((translation-native.getTranslationProperty()).Length() < 1e-5f);
+    }
+}
+
 TEST_CASE("daylight sky closes both poles with finite nondegenerate triangles")
 {
     MeshBuilder builder;

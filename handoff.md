@@ -270,6 +270,16 @@ fails the same way before the first step (two synchronous world builds where one
 `trainsim_install_layout` cannot pass with the system SDL used here (it installs the project-local
 SDL build). Not checked: the WebGL 2 build, which now also compiles the engine.
 
+The first interactive run on the owner's desktop then stopped with "Every avatar bone transform
+must be decomposable": since CNA's 2026-10-19 change to XNA's exact `Matrix::Decompose`
+(`705ea2324`, part of the CNA these builds use and of `next`), a sheared bone is refused, and the
+sit/stand transition blended the shoulder, elbow and wrist with `Matrix::Lerp`, which shears
+mid-way. The unmodified `develop` crashes the same way (`--run-seconds 120 --route-km 52 --car 3
+--time-scale 20`, at about 108 s). `blendBone` (`AvatarProportions.hpp`) now blends the rotations
+as quaternions and the translations linearly; poses outside a transition are unchanged, the 54
+views stay identical, three 180-second avatar runs at stations and on the line complete, and a
+render test checks that blended bones decompose.
+
 ## Known open issues (outside the ranked list)
 
 1. **Streaming follow-up (updated by PERF-002, 2026-10-12).** World materials are now split
