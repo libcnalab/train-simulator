@@ -1,6 +1,5 @@
 #include "trainsim/render/OpenGL33WaterEffect.hpp"
 #include "trainsim/render/WaterSurface.hpp"
-#include "trainsim/render/GpuMesh.hpp"
 #include "Microsoft/Xna/Framework/Graphics/ShaderEffect.hpp"
 #include "Microsoft/Xna/Framework/Graphics/BasicEffect.hpp"
 #include "Microsoft/Xna/Framework/Graphics/GraphicsDevice.hpp"
@@ -88,7 +87,7 @@ OpenGL33WaterEffect::OpenGL33WaterEffect(GraphicsDevice& device)
     : effect_(std::make_unique<ShaderEffect>(device,vertex.c_str(),fragment.c_str())) {}
 OpenGL33WaterEffect::~OpenGL33WaterEffect()=default;
 bool OpenGL33WaterEffect::valid() const { return effect_->IsEffectValid(); }
-void OpenGL33WaterEffect::draw(GpuMesh& mesh,GraphicsDevice& device,BasicEffect& reference,
+void OpenGL33WaterEffect::apply(GraphicsDevice& device,BasicEffect& reference,
     const Matrix& world,const Matrix& view,const Matrix& projection,double serviceSeconds,
     const Vector3& skyColour,float sunSparkle)
 {
@@ -113,6 +112,5 @@ void OpenGL33WaterEffect::draw(GpuMesh& mesh,GraphicsDevice& device,BasicEffect&
         -shift/static_cast<float>(viewport.getHeightProperty()));
     effect_->SetTexture(0,*reference.getTextureProperty());
     effect_->SetUniformInt("materialTexture",0);
-    mesh.draw(device);
 }
 }

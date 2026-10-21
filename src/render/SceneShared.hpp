@@ -448,4 +448,37 @@ struct SceneRenderer::TrackStreamingState
     std::uint64_t latePrefetches = 0;
 };
 
+// cna-engine's renderer owns the order and the blend, depth, culling and sampler states of the
+// queued draws; this binder configures the scene's own effects for each of them, as the
+// hand-written passes did (SceneBinder.cpp).
+class SceneRenderer::Binder final : public CnaEngine::Graphics::IMaterialBinder
+{
+public:
+    explicit Binder(SceneRenderer& scene) : scene_(scene) {}
+    void BeginFrame(Microsoft::Xna::Framework::Graphics::GraphicsDevice& device,
+                    const CnaEngine::Graphics::Camera& camera,
+                    const CnaEngine::Graphics::ForwardLighting& lighting) override;
+    bool Apply(Microsoft::Xna::Framework::Graphics::GraphicsDevice& device,
+               const CnaEngine::Graphics::RenderItem& item, CnaEngine::Graphics::RenderBucket bucket,
+               const CnaEngine::Graphics::Camera& camera,
+               const CnaEngine::Graphics::FallbackSink& fallback) override;
+
+private:
+    // The light and fog are the frame's and change only with the light, so each of the two
+    // lit effects is set up again only when its light changes within one Render(); other code
+    // (the sky, the people) changes them between Render() calls.
+    struct Configured
+    {
+        std::optional<Look::Light> light;
+        std::optional<bool> fog;
+    };
+    void applyLight(Microsoft::Xna::Framework::Graphics::BasicEffect& effect, Configured& configured,
+                    Look::Light light) const;
+    void applyFog(Microsoft::Xna::Framework::Graphics::BasicEffect& effect, Configured& configured,
+                  bool enabled) const;
+    SceneRenderer& scene_;
+    Configured vertexEffect_;
+    Configured materialEffect_;
+};
+
 } // namespace TrainSim::Render

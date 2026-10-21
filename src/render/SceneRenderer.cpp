@@ -466,6 +466,10 @@ SceneRenderer::SceneRenderer(GraphicsDevice& device, float vegetationDistanceMet
     door.addBox(Vector3{-0.04f,0.0f,-0.52f}, Vector3{0.04f,2.18f,0.52f}, Color(55,73,83,255));
     toiletDoor_ = std::make_unique<GpuMesh>(device_, door.take());
 
+    renderer_ = std::make_unique<CnaEngine::Graphics::ForwardRenderer>(device_);
+    binder_ = std::make_shared<Binder>(*this);
+    renderer_->SetMaterialBinder(binder_);
+
     if (avatarRenderingEnabled)
     {
         avatars_.reserve(kTotalAvatarVisuals);
@@ -629,21 +633,6 @@ void SceneRenderer::drawMesh(GpuMesh& mesh, const Matrix& world, const Matrix& v
     }
 }
 
-void SceneRenderer::drawMaterialMesh(GpuMesh& mesh, const Matrix& world, const Matrix& view,
-                                     const Matrix& projection, RenderStats& stats)
-{
-    materialEffect_->setWorldProperty(world);
-    materialEffect_->setViewProperty(view);
-    materialEffect_->setProjectionProperty(projection);
-    for (auto& pass : materialEffect_->getCurrentTechniqueProperty()->getPassesProperty())
-    {
-        pass.Apply();
-        mesh.draw(device_);
-        ++stats.drawCalls;
-        stats.triangles += mesh.triangles();
-    }
-}
-
 void SceneRenderer::drawBox(const Matrix& world, const Matrix& view, const Matrix& projection,
                             const Color& color, RenderStats& stats)
 {
@@ -655,9 +644,50 @@ void SceneRenderer::drawBox(const Matrix& world, const Matrix& view, const Matri
     effect_->setDiffuseColorProperty(previousDiffuse);
 }
 
-void SceneRenderer::drawStationClock(const Matrix& view, const Matrix& projection,
-                                     const Sim::Route& route,
-                                     const Sim::ServiceState& service, RenderStats& stats)
+void SceneRenderer::queue(const GpuMesh& mesh, const Matrix& world,
+                          const CnaEngine::Graphics::Material& material, const Look& look,
+                          RenderStats& stats)
+{
+    for (std::size_t index = 0; index < mesh.segmentCount(); ++index)
+    {
+        const CnaEngine::Graphics::GpuMesh& segment = mesh.segment(index);
+        if (!segment.IsDrawable()) continue;
+        CnaEngine::Graphics::RenderItem item;
+        item.mesh = &segment;
+        item.material = &material;
+        item.world = world;
+        item.userData = &look;
+        queue_.Submit(item, CnaEngine::Graphics::RenderBucket::Sequenced);
+    }
+    ++stats.drawCalls;
+    stats.triangles += mesh.triangles();
+}
+
+CnaEngine::Graphics::Material& SceneRenderer::frameMaterial()
+{
+    return frameMaterials_.emplace_back();
+}
+
+const SceneRenderer::Look& SceneRenderer::frameLook(const Look& look)
+{
+    return frameLooks_.emplace_back(look);
+}
+
+void SceneRenderer::render()
+{
+    queue_.Sort(camera_.Position()); // sequenced: submission order
+    renderer_->Render(queue_, camera_);
+    queue_.Clear();
+    // The sky and the people draw on effect_ directly and expect it as the passes left it.
+    effect_->setTextureProperty(whiteMaterialTexture_.get());
+    effect_->setLightingEnabledProperty(true);
+    effect_->setFogEnabledProperty(true);
+    effect_->setDiffuseColorProperty(Vector3::One);
+    effect_->setAlphaProperty(1.0f);
+}
+
+void SceneRenderer::queueStationClock(const Sim::Route& route, const Sim::ServiceState& service,
+                                      RenderStats& stats)
 {
     const std::size_t stationIndex = route.nearestStation(service.routeDistanceMetres);
     const Sim::Station& station = route.stations()[stationIndex];
@@ -687,7 +717,12 @@ void SceneRenderer::drawStationClock(const Matrix& view, const Matrix& projectio
             * Matrix::CreateRotationX(angle*side)
             * Matrix::CreateRotationY(pivot.yaw)
             * Matrix::CreateTranslation(pivot.x,pivot.y+height,pivot.z);
-        drawBox(handWorld,view,projection,Color(38,42,41,255),stats);
+        CnaEngine::Graphics::Material& hand = frameMaterial();
+        hand.vertexColors = true;
+        hand.baseTexture = whiteMaterialTexture_.get();
+        hand.sampler = &SamplerState::LinearClamp;
+        hand.diffuseColor = rgb(Color(38,42,41,255));
+        queue(*cube_,handWorld,hand,frameLook({}),stats);
         ++stats.stationClockHands;
     };
     if (station.major)
@@ -734,29 +769,69 @@ RenderStats SceneRenderer::draw(const Matrix& view, const Matrix& projection, co
     if (std::abs(shadowSun.elevation-worldSun_.elevation) > kPi/180.0
         || std::abs(shadowSun.azimuthOffset-worldSun_.azimuthOffset) > kPi/180.0)
         worldSun_ = shadowSun;
-    effect_->DirectionalLight0.setDirectionProperty(daylight);
-    materialEffect_->DirectionalLight0.setDirectionProperty(daylight);
-    // Interior ceiling fill belongs only to the passenger-space passes below. Restore the
-    // exterior single-sun setup every frame, including after a tunnel or quality change.
-    effect_->DirectionalLight1.setEnabledProperty(false);
-    effect_->DirectionalLight2.setEnabledProperty(false);
-    materialEffect_->DirectionalLight1.setEnabledProperty(false);
-    materialEffect_->DirectionalLight2.setEnabledProperty(false);
-    effect_->setVertexColorEnabledProperty(true);
-    effect_->setLightingEnabledProperty(true);
-    const auto setMaterialSpecular = [this](const Vector3& surface, float power,
-                                             const Vector3& light) {
-        if (graphicsQuality_ == 0)
-        {
-            materialEffect_->setSpecularColorProperty(Vector3::Zero);
-            materialEffect_->setSpecularPowerProperty(1.0f);
-            materialEffect_->DirectionalLight0.setSpecularColorProperty(Vector3::Zero);
-            return;
-        }
-        materialEffect_->setSpecularColorProperty(surface);
-        materialEffect_->setSpecularPowerProperty(power);
-        materialEffect_->DirectionalLight0.setSpecularColorProperty(light);
+    // The world and the train are queued below in their drawing order; the binder applies this
+    // frame's lights and fog to each draw.
+    camera_.SetMatrices(view,projection);
+    frameMaterials_.clear();
+    frameLooks_.clear();
+    frame_.daylight = daylight;
+    using CnaEngine::Graphics::BlendMode;
+    using CnaEngine::Graphics::Material;
+    using CnaEngine::Graphics::ShadingModel;
+    using Light = Look::Light;
+    // A vertex-coloured batch on effect_ over the white material texture.
+    struct Surface
+    {
+        bool lit = true;
+        Vector3 diffuse = Vector3::One;
+        float alpha = 1.0f;
+        // AlphaBlend blends straight (non-premultiplied) colours; DepthRead for every blend.
+        BlendMode blend = BlendMode::Opaque;
+        bool doubleSided = false;
     };
+    const auto queueVertex = [&](const GpuMesh& mesh, const Matrix& placement, Light light,
+                                 const Surface& surface = {}) {
+        Material& material = frameMaterial();
+        material.shading = surface.lit ? ShadingModel::Lit : ShadingModel::Unlit;
+        material.vertexColors = true;
+        material.baseTexture = whiteMaterialTexture_.get();
+        material.sampler = &SamplerState::LinearClamp;
+        material.diffuseColor = surface.diffuse;
+        material.alpha = surface.alpha;
+        material.blend = surface.blend;
+        material.straightAlpha = surface.blend == BlendMode::AlphaBlend;
+        material.doubleSided = surface.doubleSided;
+        queue(mesh,placement,material,frameLook({Look::Effect::Vertex,light}),stats);
+    };
+    const auto queueBox = [&](const Matrix& placement, const Color& color, Light light, bool lit = true) {
+        queueVertex(*cube_,placement,light,{.lit = lit, .diffuse = rgb(color)});
+    };
+    // A detail-textured material on materialEffect_ (or a shader configured from it). Low
+    // quality has no specular highlights.
+    struct Detail
+    {
+        Texture2D* texture = nullptr;
+        const SamplerState* sampler = &SamplerState::LinearClamp;
+        Vector3 specular = Vector3::Zero;
+        float power = 1.0f;
+        Vector3 keySpecular = Vector3::Zero;
+    };
+    const auto queueMaterial = [&](const GpuMesh& mesh, const Matrix& placement, Light light,
+                                   const Detail& detail,
+                                   Look::Effect effect = Look::Effect::Material) {
+        const bool specular = graphicsQuality_ != 0;
+        Material& material = frameMaterial();
+        material.vertexColors = true;
+        material.baseTexture = detail.texture;
+        material.sampler = detail.sampler;
+        material.specularColor = specular ? detail.specular : Vector3::Zero;
+        material.specularPower = specular ? detail.power : 1.0f;
+        queue(mesh,placement,material,
+              frameLook({effect,light,specular ? detail.keySpecular : Vector3::Zero}),stats);
+    };
+    // Terrain-scale detail wraps; High adds anisotropy.
+    const SamplerState* const detailSampler = graphicsQuality_ >= 2
+        ? &SamplerState::AnisotropicWrap : &SamplerState::LinearWrap;
 
     updateTrack(route,service);
     stats.trackRebuilds = trackRebuilds_;
@@ -913,32 +988,21 @@ RenderStats SceneRenderer::draw(const Matrix& view, const Matrix& projection, co
 
     // Outdoor illumination fades at tunnel portals while the train's own interior lighting is
     // restored below. Tunnel fixtures remain visible through the deliberately non-black ambient.
-    const auto outdoorLight=exteriorLighting(tunnelLightingMix_,atmosphere_.light);
-    effect_->setAmbientLightColorProperty(outdoorLight.ambient);
-    effect_->DirectionalLight0.setDiffuseColorProperty(outdoorLight.diffuse);
-    // Shaded facades otherwise take only the cool sky ambient and lose their own hue.
-    for (BasicEffect* exterior : {effect_.get(),materialEffect_.get()})
-    {
-        exterior->DirectionalLight1.setEnabledProperty(true);
-        exterior->DirectionalLight1.setDirectionProperty(groundBounceDirection(daylight));
-        exterior->DirectionalLight1.setDiffuseColorProperty(outdoorLight.bounce);
-        exterior->DirectionalLight1.setSpecularColorProperty(Vector3::Zero);
-        exterior->DirectionalLight2.setEnabledProperty(true);
-        exterior->DirectionalLight2.setDirectionProperty(groundUplightDirection());
-        exterior->DirectionalLight2.setDiffuseColorProperty(outdoorLight.uplight);
-        exterior->DirectionalLight2.setSpecularColorProperty(Vector3::Zero);
-    }
-    const Vector3 atmosphericFog=atmosphere_.fogColour*(1.0f-tunnelLightingMix_)
+    frame_.outdoor = exteriorLighting(tunnelLightingMix_,atmosphere_.light);
+    frame_.bounceDirection = groundBounceDirection(daylight);
+    frame_.uplightDirection = groundUplightDirection();
+    // Platform lamps light the paving after dark (ENV-138).
+    frame_.floodlit = exteriorLighting(tunnelLightingMix_,stationLighting(atmosphere_));
+    frame_.fogColour = atmosphere_.fogColour*(1.0f-tunnelLightingMix_)
         +Vector3{0.075f,0.082f,0.090f}*tunnelLightingMix_;
-    effect_->setFogColorProperty(atmosphericFog);
-    for (BasicEffect* exterior : {effect_.get(),materialEffect_.get()})
-    {
-        exterior->setFogStartProperty(atmosphere_.fogStart);
-        exterior->setFogEndProperty(atmosphere_.fogEnd);
-    }
-    materialEffect_->setAmbientLightColorProperty(outdoorLight.ambient);
-    materialEffect_->DirectionalLight0.setDiffuseColorProperty(outdoorLight.diffuse);
-    materialEffect_->setFogColorProperty(atmosphericFog);
+    frame_.fogStart = atmosphere_.fogStart;
+    frame_.fogEnd = atmosphere_.fogEnd;
+    // The water's analytic reflection scales with the atmosphere's zenith (ENV-138/139).
+    const Vector3 zenith = atmosphere_.sky.zenith;
+    frame_.waterSky = Vector3{0.35f*(zenith.X/69.0f),0.59f*(zenith.Y/136.0f),
+                              0.76f*(zenith.Z/198.0f)};
+    frame_.sunSparkle = atmosphere_.direct*atmosphere_.sunDisc;
+    frame_.serviceSeconds = service.serviceElapsedSeconds;
 
     // Recent travel per rendered frame, a decaying maximum so acceleration is seen at once.
     // Teleports and the first frame do not count as travel.
@@ -968,57 +1032,39 @@ RenderStats SceneRenderer::draw(const Matrix& view, const Matrix& projection, co
         route, service.routeDistanceMetres, worldAnchorDistance_);
     const Matrix worldPlacement = Matrix::CreateRotationY(worldAnchor.yaw)
                                 * Matrix::CreateTranslation(worldAnchor.x, worldAnchor.y, worldAnchor.z);
-    const auto drawPrintedText=[&](const std::unique_ptr<GpuMesh>& lettering,const Matrix& placement) {
+    // The dot-matrix font over its own unlit effect, blended without writing depth.
+    const auto queuePrintedText=[&](const std::unique_ptr<GpuMesh>& lettering,const Matrix& placement) {
         if (!lettering) return;
-        passengerDisplayEffect_->setWorldProperty(placement);
-        passengerDisplayEffect_->setViewProperty(view);
-        passengerDisplayEffect_->setProjectionProperty(projection);
-        device_.getSamplerStatesProperty()[0]=SamplerState::LinearClamp;
-        device_.setBlendStateProperty(BlendState::NonPremultiplied);
-        device_.setDepthStencilStateProperty(DepthStencilState::DepthRead);
-        for (auto& pass : passengerDisplayEffect_->getCurrentTechniqueProperty()->getPassesProperty())
-        {
-            pass.Apply();
-            lettering->draw(device_);
-            ++stats.drawCalls;
-            stats.triangles+=lettering->triangles();
-        }
-        device_.setDepthStencilStateProperty(DepthStencilState::Default);
-        device_.setBlendStateProperty(BlendState::Opaque);
+        Material& material = frameMaterial();
+        material.shading = ShadingModel::Unlit;
+        material.blend = BlendMode::AlphaBlend;
+        material.straightAlpha = true;
+        material.vertexColors = true;
+        material.baseTexture = passengerDisplayFontTexture_.get();
+        material.sampler = &SamplerState::LinearClamp;
+        material.fog = false;
+        queue(*lettering,placement,material,frameLook({Look::Effect::Lettering}),stats);
     };
     if (terrain_)
     {
-        setMaterialSpecular(Vector3::Zero,1.0f,Vector3::Zero);
-        device_.getSamplerStatesProperty()[0] = graphicsQuality_ >= 2
-            ? SamplerState::AnisotropicWrap : SamplerState::LinearWrap;
-        materialEffect_->setTextureProperty(terrainDetailTexture_.get());
-        materialEffect_->setDiffuseColorProperty(Vector3::One);
-        drawMaterialMesh(*terrain_,worldPlacement,view,projection,stats);
-        stats.terrainMaterialTriangles = terrain_->triangles();
         // Terrain alone needs wrapping and anisotropy. Constant-UV neutral materials use the
         // stock clamp sampler; leaving the anisotropic sampler installed makes zero-derivative
         // lookups render black or striped on Mesa llvmpipe and is needless on hardware too.
-        device_.getSamplerStatesProperty()[0] = SamplerState::LinearClamp;
+        queueMaterial(*terrain_,worldPlacement,Light::Outdoor,
+                      {.texture = terrainDetailTexture_.get(), .sampler = detailSampler});
+        stats.terrainMaterialTriangles = terrain_->triangles();
     }
     if (foliageMaterial_)
     {
-        setMaterialSpecular(Vector3::Zero,1.0f,Vector3::Zero);
-        device_.getSamplerStatesProperty()[0] = SamplerState::LinearWrap;
-        materialEffect_->setTextureProperty(foliageDetailTexture_.get());
-        materialEffect_->setDiffuseColorProperty(Vector3::One);
-        drawMaterialMesh(*foliageMaterial_,worldPlacement,view,projection,stats);
+        queueMaterial(*foliageMaterial_,worldPlacement,Light::Outdoor,
+                      {.texture = foliageDetailTexture_.get(), .sampler = &SamplerState::LinearWrap});
         stats.foliageMaterialTriangles = foliageMaterial_->triangles();
-        device_.getSamplerStatesProperty()[0] = SamplerState::LinearClamp;
     }
     if (needleMaterial_)
     {
-        setMaterialSpecular(Vector3::Zero,1.0f,Vector3::Zero);
-        device_.getSamplerStatesProperty()[0] = SamplerState::LinearWrap;
-        materialEffect_->setTextureProperty(needleDetailTexture_.get());
-        materialEffect_->setDiffuseColorProperty(Vector3::One);
-        drawMaterialMesh(*needleMaterial_,worldPlacement,view,projection,stats);
+        queueMaterial(*needleMaterial_,worldPlacement,Light::Outdoor,
+                      {.texture = needleDetailTexture_.get(), .sampler = &SamplerState::LinearWrap});
         stats.foliageMaterialTriangles += needleMaterial_->triangles();
-        device_.getSamplerStatesProperty()[0] = SamplerState::LinearClamp;
     }
     if (leafSprays_ || needleSprays_)
     {
@@ -1032,148 +1078,93 @@ RenderStats SceneRenderer::draw(const Matrix& view, const Matrix& projection, co
             : Vector3{ratio(air.ambient.X+0.6f*air.diffuse.X,reference.ambient.X+0.6f*reference.diffuse.X),
                       ratio(air.ambient.Y+0.6f*air.diffuse.Y,reference.ambient.Y+0.6f*reference.diffuse.Y),
                       ratio(air.ambient.Z+0.6f*air.diffuse.Z,reference.ambient.Z+0.6f*reference.diffuse.Z)};
-        leafSprayEffect_->setDiffuseColorProperty(sprayTint);
-        leafSprayEffect_->setWorldProperty(worldPlacement);
-        leafSprayEffect_->setViewProperty(view);
-        leafSprayEffect_->setProjectionProperty(projection);
-        leafSprayEffect_->setFogEnabledProperty(materialEffect_->getFogEnabledProperty());
-        leafSprayEffect_->setFogStartProperty(materialEffect_->getFogStartProperty());
-        leafSprayEffect_->setFogEndProperty(materialEffect_->getFogEndProperty());
-        leafSprayEffect_->setFogColorProperty(materialEffect_->getFogColorProperty());
+        // Alpha-tested cards, fogged like the materials, drawn where they stand in the order.
         for (const auto& [sprayMesh,sprayTexture] : std::array{
                  std::pair{leafSprays_.get(),leafSprayTexture_.get()},
                  std::pair{needleSprays_.get(),needleSprayTexture_.get()}})
         {
             if (!sprayMesh) continue;
-            leafSprayEffect_->setTextureProperty(sprayTexture);
-            for (auto& pass:leafSprayEffect_->getCurrentTechniqueProperty()->getPassesProperty())
-            {
-                pass.Apply();
-                sprayMesh->draw(device_);
-                ++stats.drawCalls;
-                stats.triangles+=sprayMesh->triangles();
-                stats.foliageMaterialTriangles+=sprayMesh->triangles();
-            }
+            Material& material = frameMaterial();
+            material.shading = ShadingModel::Unlit;
+            material.blend = BlendMode::AlphaTest;
+            material.vertexColors = true;
+            material.baseTexture = sprayTexture;
+            material.sampler = &SamplerState::LinearClamp;
+            material.diffuseColor = sprayTint;
+            queue(*sprayMesh,worldPlacement,material,frameLook({Look::Effect::Spray}),stats);
+            stats.foliageMaterialTriangles+=sprayMesh->triangles();
         }
     }
     if (roofMaterial_)
-    {
-        setMaterialSpecular(Vector3::Zero,1.0f,Vector3::Zero);
-        device_.getSamplerStatesProperty()[0] = SamplerState::LinearWrap;
-        materialEffect_->setTextureProperty(roofDetailTexture_.get());
-        materialEffect_->setDiffuseColorProperty(Vector3::One);
-        drawMaterialMesh(*roofMaterial_,worldPlacement,view,projection,stats);
-        device_.getSamplerStatesProperty()[0] = SamplerState::LinearClamp;
-    }
+        queueMaterial(*roofMaterial_,worldPlacement,Light::Outdoor,
+                      {.texture = roofDetailTexture_.get(), .sampler = &SamplerState::LinearWrap});
     if (waterMaterial_)
     {
         // Medium/High use filtered animated normals and analytic sky Fresnel in one pass.
         // Low, or an unavailable custom effect, retains the stock textured material.
-        setMaterialSpecular(Vector3{0.34f,0.42f,0.48f},72.0f,
-                            Vector3{0.62f,0.62f,0.54f});
-        device_.getSamplerStatesProperty()[0] = graphicsQuality_ >= 2
-            ? SamplerState::AnisotropicWrap : SamplerState::LinearWrap;
-        materialEffect_->setTextureProperty(waterDetailTexture_.get());
-        materialEffect_->setDiffuseColorProperty(Vector3::One);
+        const Detail water{.texture = waterDetailTexture_.get(), .sampler = detailSampler,
+                           .specular = Vector3{0.34f,0.42f,0.48f}, .power = 72.0f,
+                           .keySpecular = Vector3{0.62f,0.62f,0.54f}};
         if (graphicsQuality_>=1 && !waterEffect_)
             waterEffect_=std::make_unique<OpenGL33WaterEffect>(device_);
         if (graphicsQuality_>=1 && waterEffect_->valid())
         {
-            // The analytic reflection scales with the atmosphere's zenith (ENV-138/139).
-            const Vector3 zenith = atmosphere_.sky.zenith;
-            const Vector3 waterSky{0.35f*(zenith.X/69.0f),0.59f*(zenith.Y/136.0f),
-                                   0.76f*(zenith.Z/198.0f)};
-            waterEffect_->draw(*waterMaterial_,device_,*materialEffect_,worldPlacement,
-                               view,projection,service.serviceElapsedSeconds,waterSky,
-                               atmosphere_.direct*atmosphere_.sunDisc);
-            ++stats.drawCalls;
+            queueMaterial(*waterMaterial_,worldPlacement,Light::Outdoor,water,Look::Effect::Water);
             ++stats.waterShaderDraws;
-            stats.triangles+=waterMaterial_->triangles();
         }
         else
-            drawMaterialMesh(*waterMaterial_,worldPlacement,view,projection,stats);
+            queueMaterial(*waterMaterial_,worldPlacement,Light::Outdoor,water);
         stats.waterMaterialTriangles = waterMaterial_->triangles();
-        device_.getSamplerStatesProperty()[0] = SamplerState::LinearClamp;
     }
     if (platformMaterial_)
     {
-        setMaterialSpecular(Vector3{0.055f,0.055f,0.05f},18.0f,
-                            Vector3{0.30f,0.29f,0.25f});
-        device_.getSamplerStatesProperty()[0] = graphicsQuality_ >= 2
-            ? SamplerState::AnisotropicWrap : SamplerState::LinearWrap;
-        materialEffect_->setTextureProperty(concreteDetailTexture_.get());
-        materialEffect_->setDiffuseColorProperty(Vector3::One);
         // Platform lamps light the paving after dark (ENV-138).
-        const bool floodlit = atmosphere_.night > 0.0f;
-        if (floodlit)
-        {
-            const auto lamps = exteriorLighting(tunnelLightingMix_,stationLighting(atmosphere_));
-            materialEffect_->setAmbientLightColorProperty(lamps.ambient);
-            materialEffect_->DirectionalLight0.setDiffuseColorProperty(lamps.diffuse);
-        }
-        drawMaterialMesh(*platformMaterial_,worldPlacement,view,projection,stats);
-        if (floodlit)
-        {
-            materialEffect_->setAmbientLightColorProperty(outdoorLight.ambient);
-            materialEffect_->DirectionalLight0.setDiffuseColorProperty(outdoorLight.diffuse);
-        }
+        queueMaterial(*platformMaterial_,worldPlacement,
+                      atmosphere_.night > 0.0f ? Light::Floodlit : Light::Outdoor,
+                      {.texture = concreteDetailTexture_.get(), .sampler = detailSampler,
+                       .specular = Vector3{0.055f,0.055f,0.05f}, .power = 18.0f,
+                       .keySpecular = Vector3{0.30f,0.29f,0.25f}});
         stats.platformMaterialTriangles = platformMaterial_->triangles();
-        device_.getSamplerStatesProperty()[0] = SamplerState::LinearClamp;
     }
     if (facadeMaterial_)
     {
-        setMaterialSpecular(Vector3{0.035f,0.033f,0.03f},14.0f,
-                            Vector3{0.25f,0.23f,0.20f});
-        materialEffect_->setTextureProperty(masonryDetailTexture_.get());
-        materialEffect_->setDiffuseColorProperty(Vector3::One);
-        device_.getSamplerStatesProperty()[0] = graphicsQuality_ >= 2
-            ? SamplerState::AnisotropicWrap : SamplerState::LinearWrap;
+        const Detail masonry{.texture = masonryDetailTexture_.get(), .sampler = detailSampler,
+                             .specular = Vector3{0.035f,0.033f,0.03f}, .power = 14.0f,
+                             .keySpecular = Vector3{0.25f,0.23f,0.20f}};
         if (facadeLightingMode_>0)
         {
             if (!facadeEffect_) facadeEffect_=std::make_unique<OpenGL33FacadeEffect>(device_);
-            facadeEffect_->draw(*facadeMaterial_,device_,*materialEffect_,worldPlacement,view,projection,facadeLightingMode_==2);
-            ++stats.drawCalls; ++stats.facadeShaderDraws; stats.triangles+=facadeMaterial_->triangles();
+            queueMaterial(*facadeMaterial_,worldPlacement,Light::Outdoor,masonry,Look::Effect::Facade);
+            ++stats.facadeShaderDraws;
         }
-        else drawMaterialMesh(*facadeMaterial_,worldPlacement,view,projection,stats);
+        else queueMaterial(*facadeMaterial_,worldPlacement,Light::Outdoor,masonry);
         stats.facadeMaterialTriangles = facadeMaterial_->triangles();
-        device_.getSamplerStatesProperty()[0] = SamplerState::LinearClamp;
     }
     if (renderedFacadeMaterial_)
     {
-        setMaterialSpecular(Vector3{0.022f,0.022f,0.020f},11.0f,
-                            Vector3{0.22f,0.21f,0.19f});
-        materialEffect_->setTextureProperty(renderedFacadeDetailTexture_.get());
-        materialEffect_->setDiffuseColorProperty(Vector3::One);
-        device_.getSamplerStatesProperty()[0] = graphicsQuality_ >= 2
-            ? SamplerState::AnisotropicWrap : SamplerState::LinearWrap;
+        const Detail plaster{.texture = renderedFacadeDetailTexture_.get(), .sampler = detailSampler,
+                             .specular = Vector3{0.022f,0.022f,0.020f}, .power = 11.0f,
+                             .keySpecular = Vector3{0.22f,0.21f,0.19f}};
         if (facadeLightingMode_>0)
         {
             if (!facadeEffect_) facadeEffect_=std::make_unique<OpenGL33FacadeEffect>(device_);
-            facadeEffect_->draw(*renderedFacadeMaterial_,device_,*materialEffect_,worldPlacement,view,projection,facadeLightingMode_==2);
-            ++stats.drawCalls; ++stats.facadeShaderDraws; stats.triangles+=renderedFacadeMaterial_->triangles();
+            queueMaterial(*renderedFacadeMaterial_,worldPlacement,Light::Outdoor,plaster,
+                          Look::Effect::Facade);
+            ++stats.facadeShaderDraws;
         }
-        else drawMaterialMesh(*renderedFacadeMaterial_,worldPlacement,view,projection,stats);
+        else queueMaterial(*renderedFacadeMaterial_,worldPlacement,Light::Outdoor,plaster);
         stats.renderedFacadeMaterialTriangles = renderedFacadeMaterial_->triangles();
-        device_.getSamplerStatesProperty()[0] = SamplerState::LinearClamp;
     }
     if (staticWorldShadows_)
     {
-        effect_->setLightingEnabledProperty(false);
-        effect_->setDiffuseColorProperty(Vector3::One);
         // Baked shadows fade with a low sun and under cloud (ENV-138/139).
-        if (atmosphere_.shadowStrength < 1.0f)
-            effect_->setAlphaProperty(atmosphere_.shadowStrength);
-        device_.setBlendStateProperty(BlendState::NonPremultiplied);
-        device_.setDepthStencilStateProperty(DepthStencilState::DepthRead);
-        drawMesh(*staticWorldShadows_,worldPlacement,view,projection,stats);
-        effect_->setAlphaProperty(1.0f);
+        queueVertex(*staticWorldShadows_,worldPlacement,Light::Outdoor,
+                    {.lit = false, .alpha = std::min(atmosphere_.shadowStrength,1.0f),
+                     .blend = BlendMode::AlphaBlend});
         stats.staticContactShadowTriangles = staticWorldShadows_->triangles();
-        device_.setBlendStateProperty(BlendState::Opaque);
-        device_.setDepthStencilStateProperty(DepthStencilState::Default);
-        effect_->setLightingEnabledProperty(true);
     }
-    drawMesh(*staticWorld_, worldPlacement, view, projection, stats);
-    drawPrintedText(stationLettering_,worldPlacement);
+    queueVertex(*staticWorld_,worldPlacement,Light::Outdoor);
+    queuePrintedText(stationLettering_,worldPlacement);
     stats.lakesideWaterPatches = worldCounters_.staticWorldLakePatches_;
     stats.lakesideBankTrees = worldCounters_.staticWorldLakeBankTrees_;
     stats.hayBaleStacks = worldCounters_.staticWorldHayBaleStacks_;
@@ -1248,27 +1239,14 @@ RenderStats SceneRenderer::draw(const Matrix& view, const Matrix& projection, co
     stats.urbanStreetPockets = worldCounters_.staticWorldUrbanStreetPockets_;
     stats.urbanResidentialEntrancePaths = worldCounters_.staticWorldUrbanResidentialEntrancePaths_;
     if (worldLuminaires_)
-    {
-        effect_->setLightingEnabledProperty(false);
-        drawMesh(*worldLuminaires_, worldPlacement, view, projection, stats);
-        effect_->setLightingEnabledProperty(true);
-    }
+        queueVertex(*worldLuminaires_,worldPlacement,Light::Outdoor,{.lit = false});
     // Lit windows, lamp heads and light pools fade in after sunset (ENV-138).
     if (worldNightGlow_ && atmosphere_.night > 0.01f)
     {
-        effect_->setLightingEnabledProperty(false);
-        effect_->setDiffuseColorProperty(Vector3::One);
-        effect_->setAlphaProperty(atmosphere_.night);
-        device_.setBlendStateProperty(BlendState::Additive);
-        device_.setDepthStencilStateProperty(DepthStencilState::DepthRead);
-        device_.setRasterizerStateProperty(RasterizerState::CullNone);
-        drawMesh(*worldNightGlow_, worldPlacement, view, projection, stats);
+        queueVertex(*worldNightGlow_,worldPlacement,Light::Outdoor,
+                    {.lit = false, .alpha = atmosphere_.night, .blend = BlendMode::Additive,
+                     .doubleSided = true});
         stats.nightGlowTriangles = worldNightGlow_->triangles();
-        device_.setRasterizerStateProperty(RasterizerState::CullCounterClockwise);
-        device_.setDepthStencilStateProperty(DepthStencilState::Default);
-        device_.setBlendStateProperty(BlendState::Opaque);
-        effect_->setAlphaProperty(1.0f);
-        effect_->setLightingEnabledProperty(true);
     }
 
     // One live departure board belongs to the platform currently being approached or occupied.
@@ -1295,11 +1273,9 @@ RenderStats SceneRenderer::draw(const Matrix& view, const Matrix& projection, co
         const Matrix platformWorld = Matrix::CreateRotationY(placement.yaw)
                                    * Matrix::CreateTranslation(
                                        placement.x,placement.y,placement.z);
-        effect_->setLightingEnabledProperty(false);
-        drawMesh(*platformInformation_,platformWorld,view,projection,stats);
-        drawPrintedText(platformLettering_,platformWorld);
+        queueVertex(*platformInformation_,platformWorld,Light::Outdoor,{.lit = false});
+        queuePrintedText(platformLettering_,platformWorld);
         ++stats.platformInformationBoards;
-        effect_->setLightingEnabledProperty(true);
     }
 
     // Oncoming and parked consists (ENV-137) draw one complete mesh per vehicle. The leading
@@ -1318,20 +1294,13 @@ RenderStats SceneRenderer::draw(const Matrix& view, const Matrix& projection, co
                 continue;
             const Matrix vehicleWorld = Matrix::CreateRotationY(point.yaw + kPi)
                                       * Matrix::CreateTranslation(point.x,point.y,point.z);
-            drawMesh(*otherVehicles_[static_cast<std::size_t>(vehicle.kind)],vehicleWorld,
-                     view,projection,stats);
+            queueVertex(*otherVehicles_[static_cast<std::size_t>(vehicle.kind)],vehicleWorld,
+                        Light::Outdoor);
             if (GpuMesh* glow = otherVehicleNight_[static_cast<std::size_t>(vehicle.kind)].get();
                 glow != nullptr && atmosphere_.night > 0.05f)
             {
-                effect_->setLightingEnabledProperty(false);
-                effect_->setAlphaProperty(atmosphere_.night);
-                device_.setBlendStateProperty(BlendState::Additive);
-                device_.setDepthStencilStateProperty(DepthStencilState::DepthRead);
-                drawMesh(*glow,vehicleWorld,view,projection,stats);
-                device_.setDepthStencilStateProperty(DepthStencilState::Default);
-                device_.setBlendStateProperty(BlendState::Opaque);
-                effect_->setAlphaProperty(1.0f);
-                effect_->setLightingEnabledProperty(true);
+                queueVertex(*glow,vehicleWorld,Light::Outdoor,
+                            {.lit = false, .alpha = atmosphere_.night, .blend = BlendMode::Additive});
                 ++stats.otherTrainNightOverlays;
             }
             ++stats.otherTrainCars;
@@ -1393,12 +1362,10 @@ RenderStats SceneRenderer::draw(const Matrix& view, const Matrix& projection, co
                     feature.routeDistance - 0.27 * static_cast<double>(facingDirection),
                     lensLateral);
                 // Lit aspects glow unshaded after dark (ENV-138).
-                if (lampsGlow) effect_->setLightingEnabledProperty(false);
-                drawBox(orientedBoxMatrix(lens.x,lens.y+lensHeight,lens.z,
-                                          0.18f,0.18f,0.09f,
-                                          lens.yaw + (facingDirection < 0 ? kPi : 0.0f)),
-                        view, projection, aspect, stats);
-                if (lampsGlow) effect_->setLightingEnabledProperty(true);
+                queueBox(orientedBoxMatrix(lens.x,lens.y+lensHeight,lens.z,
+                                           0.18f,0.18f,0.09f,
+                                           lens.yaw + (facingDirection < 0 ? kPi : 0.0f)),
+                         aspect,Light::Outdoor,!lampsGlow);
             }
             else if (feature.kind == World::FeatureKind::LevelCrossing)
             {
@@ -1406,7 +1373,6 @@ RenderStats SceneRenderer::draw(const Matrix& view, const Matrix& projection, co
                     feature.routeDistance,service.routeDistanceMetres,seconds);
                 const float closure = static_cast<float>(requiredClosure);
                 const float barrierAngle = (1.0f-closure)*1.309f;
-                effect_->setDiffuseColorProperty(Vector3::One);
                 for (double side : {-1.0,1.0})
                 {
                     const LocalRoutePoint pivot = localRoutePoint(
@@ -1415,7 +1381,7 @@ RenderStats SceneRenderer::draw(const Matrix& view, const Matrix& projection, co
                     const Matrix barrierWorld = Matrix::CreateRotationX(-barrierAngle)
                         * Matrix::CreateRotationY(pivot.yaw)
                         * Matrix::CreateTranslation(pivot.x,pivot.y+1.55f,pivot.z);
-                    drawMesh(*levelCrossingBarrier_,barrierWorld,view,projection,stats);
+                    queueVertex(*levelCrossingBarrier_,barrierWorld,Light::Outdoor);
                     ++stats.levelCrossingBarriers;
                 }
 
@@ -1428,11 +1394,9 @@ RenderStats SceneRenderer::draw(const Matrix& view, const Matrix& projection, co
                         const LocalRoutePoint lens = localRoutePoint(
                             route,service.routeDistanceMetres,
                             feature.routeDistance-4.2+lensOffset,side*8.44);
-                        if (lampsGlow) effect_->setLightingEnabledProperty(false);
-                        drawBox(orientedBoxMatrix(lens.x,lens.y+2.15f,lens.z,
-                                                  0.055f,0.16f,0.16f,lens.yaw),
-                                view,projection,Color(239,49,39,255),stats);
-                        if (lampsGlow) effect_->setLightingEnabledProperty(true);
+                        queueBox(orientedBoxMatrix(lens.x,lens.y+2.15f,lens.z,
+                                                   0.055f,0.16f,0.16f,lens.yaw),
+                                 Color(239,49,39,255),Light::Outdoor,!lampsGlow);
                         ++stats.levelCrossingWarningLights;
                     }
                 }
@@ -1453,9 +1417,8 @@ RenderStats SceneRenderer::draw(const Matrix& view, const Matrix& projection, co
                     * Matrix::CreateRotationY(vehiclePoint.yaw + (direction < 0.0f ? kPi : 0.0f))
                     * Matrix::CreateTranslation(vehiclePoint.x,vehiclePoint.y-0.20f,
                                                 vehiclePoint.z);
-                effect_->setDiffuseColorProperty(Vector3::One);
-                drawMesh(*roadVehicles_[feature.variant % roadVehicles_.size()], vehicleWorld,
-                         view, projection, stats);
+                queueVertex(*roadVehicles_[feature.variant % roadVehicles_.size()],vehicleWorld,
+                            Light::Outdoor);
                 ++stats.roadVehicles;
             }
         }
@@ -1468,7 +1431,6 @@ RenderStats SceneRenderer::draw(const Matrix& view, const Matrix& projection, co
         if (!World::movingOtherTrainVisible(feature,seconds,route.lengthMetres())) continue;
         const double otherDistance = World::movingOtherTrainDistance(
             feature,seconds,route.lengthMetres());
-        effect_->setDiffuseColorProperty(Vector3::One);
         drawOtherConsist(World::otherTrainConsist(World::otherTrainType(feature.variant)),
                          otherDistance,dynamicRange,[&route](double distance) {
                              return route.parallelTrackLateralMetres(distance);
@@ -1485,7 +1447,6 @@ RenderStats SceneRenderer::draw(const Matrix& view, const Matrix& projection, co
         double parkedCentre = nearbyStation.distanceMetres;
         if (nearbyStationIndex == 0) parkedCentre += 48.0;
         else if (nearbyStationIndex + 1 == route.stations().size()) parkedCentre -= 48.0;
-        effect_->setDiffuseColorProperty(Vector3::One);
         drawOtherConsist(World::otherTrainConsist(nearbyStationIndex % 2 == 0
                                                        ? World::OtherTrainType::RegionalEmu
                                                        : World::OtherTrainType::DieselUnit),
@@ -1497,33 +1458,26 @@ RenderStats SceneRenderer::draw(const Matrix& view, const Matrix& projection, co
 
     // Ballast, rails and the dense sleeper field are one batch. Only the small sleeper repeat
     // offset changes, which avoids hundreds of tiny draw calls per frame.
-    effect_->setDiffuseColorProperty(Vector3::One);
     const LocalRoutePoint trackAnchor = localRoutePoint(
         route, service.routeDistanceMetres, trackAnchorDistance_);
     const Matrix trackWorld = Matrix::CreateRotationY(trackAnchor.yaw)
                             * Matrix::CreateTranslation(trackAnchor.x, trackAnchor.y, trackAnchor.z);
     if (trackBedMaterial_)
     {
-        setMaterialSpecular(Vector3::Zero,1.0f,Vector3::Zero);
-        device_.getSamplerStatesProperty()[0] = graphicsQuality_ >= 2
-            ? SamplerState::AnisotropicWrap : SamplerState::LinearWrap;
-        materialEffect_->setTextureProperty(ballastDetailTexture_.get());
-        materialEffect_->setDiffuseColorProperty(Vector3::One);
-        drawMaterialMesh(*trackBedMaterial_,trackWorld,view,projection,stats);
+        queueMaterial(*trackBedMaterial_,trackWorld,Light::Outdoor,
+                      {.texture = ballastDetailTexture_.get(), .sampler = detailSampler});
         stats.ballastMaterialTriangles = trackBedMaterial_->triangles();
-        device_.getSamplerStatesProperty()[0] = SamplerState::LinearClamp;
     }
     if (railHeadMaterial_)
     {
-        setMaterialSpecular(Vector3{0.34f,0.36f,0.35f},64.0f,
-                            Vector3{0.56f,0.54f,0.48f});
-        materialEffect_->setTextureProperty(whiteMaterialTexture_.get());
-        materialEffect_->setDiffuseColorProperty(Vector3::One);
-        device_.getSamplerStatesProperty()[0] = SamplerState::LinearClamp;
-        drawMaterialMesh(*railHeadMaterial_,trackWorld,view,projection,stats);
+        queueMaterial(*railHeadMaterial_,trackWorld,Light::Outdoor,
+                      {.texture = whiteMaterialTexture_.get(), .sampler = &SamplerState::LinearClamp,
+                       .specular = Vector3{0.34f,0.36f,0.35f}, .power = 64.0f,
+                       .keySpecular = Vector3{0.56f,0.54f,0.48f}});
         stats.railHeadMaterialTriangles = railHeadMaterial_->triangles();
     }
-    drawMesh(*trackDetail_, trackWorld, view, projection, stats);
+    queueVertex(*trackDetail_,trackWorld,Light::Outdoor);
+    render();
 
     // Draw people before the train shell. The opaque interior can then mask bodies behind seat
     // backs, toilet walls, and cab doors while the final transparent-glass pass keeps the intended
@@ -1533,98 +1487,54 @@ RenderStats SceneRenderer::draw(const Matrix& view, const Matrix& projection, co
     drawPlatformPeople(view, projection, route, service, stats);
     device_.setBlendStateProperty(BlendState::Opaque);
     device_.setDepthStencilStateProperty(DepthStencilState::Default);
-    effect_->setLightingEnabledProperty(true);
-    drawStationClock(view,projection,route,service,stats);
+    queueStationClock(route,service,stats);
 
-    // The passenger saloon is independently lit, so it stays comfortable and readable while the
-    // scenery beyond the windows transitions through a tunnel.
-    const auto applySaloonLight = [](auto& effect) {
-        // Broad, diffuse ceiling-strip approximation. Opposed longitudinal fill reveals both
-        // seat orientations without specular points or a sun-facing/non-sun-facing black side.
-        // Keep upward-facing light bounded: these lights supplement, not duplicate, the sun.
-        effect.setAmbientLightColorProperty(Vector3{0.60f,0.61f,0.62f});
-        effect.DirectionalLight0.setDiffuseColorProperty(Vector3{0.26f,0.25f,0.23f});
-        effect.DirectionalLight1.setEnabledProperty(true);
-        effect.DirectionalLight1.setDirectionProperty(Vector3{0.0f,-0.70710678f,-0.70710678f});
-        effect.DirectionalLight1.setDiffuseColorProperty(Vector3{0.16f,0.17f,0.18f});
-        effect.DirectionalLight1.setSpecularColorProperty(Vector3::Zero);
-        effect.DirectionalLight2.setEnabledProperty(true);
-        effect.DirectionalLight2.setDirectionProperty(Vector3{0.0f,-0.70710678f,0.70710678f});
-        effect.DirectionalLight2.setDiffuseColorProperty(Vector3{0.16f,0.17f,0.18f});
-        effect.DirectionalLight2.setSpecularColorProperty(Vector3::Zero);
-    };
-    applySaloonLight(*effect_);
-    effect_->setDiffuseColorProperty(Vector3::One);
+    // The passenger saloon is independently lit (Light::Saloon), so it stays comfortable and
+    // readable while the scenery beyond the windows transitions through a tunnel.
     const Matrix trainWorld = Matrix::CreateTranslation(0.0f,kTrainFloorElevation,0.0f);
     if (interiorMaterial_)
     {
         // Passenger-space materials use the independent interior illumination even in tunnels.
-        applySaloonLight(*materialEffect_);
-        setMaterialSpecular(Vector3{0.018f,0.018f,0.016f},8.0f,
-                            Vector3{0.22f,0.21f,0.18f});
-        materialEffect_->setTextureProperty(carpetDetailTexture_.get());
-        materialEffect_->setDiffuseColorProperty(Vector3::One);
-        device_.getSamplerStatesProperty()[0] = graphicsQuality_ >= 2
-            ? SamplerState::AnisotropicWrap : SamplerState::LinearWrap;
-        drawMaterialMesh(*interiorMaterial_,trainWorld,view,projection,stats);
+        queueMaterial(*interiorMaterial_,trainWorld,Light::Saloon,
+                      {.texture = carpetDetailTexture_.get(), .sampler = detailSampler,
+                       .specular = Vector3{0.018f,0.018f,0.016f}, .power = 8.0f,
+                       .keySpecular = Vector3{0.22f,0.21f,0.18f}});
         stats.interiorMaterialTriangles = interiorMaterial_->triangles();
-        device_.getSamplerStatesProperty()[0] = SamplerState::LinearClamp;
     }
     if (upholsteryMaterial_)
     {
-        setMaterialSpecular(Vector3{0.012f,0.012f,0.012f},6.0f,Vector3{0.20f,0.20f,0.20f});
-        materialEffect_->setTextureProperty(upholsteryDetailTexture_.get());
-        device_.getSamplerStatesProperty()[0] = graphicsQuality_ >= 2
-            ? SamplerState::AnisotropicWrap : SamplerState::LinearWrap;
-        drawMaterialMesh(*upholsteryMaterial_,trainWorld,view,projection,stats);
+        queueMaterial(*upholsteryMaterial_,trainWorld,Light::Saloon,
+                      {.texture = upholsteryDetailTexture_.get(), .sampler = detailSampler,
+                       .specular = Vector3{0.012f,0.012f,0.012f}, .power = 6.0f,
+                       .keySpecular = Vector3{0.20f,0.20f,0.20f}});
         stats.interiorMaterialTriangles += upholsteryMaterial_->triangles();
-        device_.getSamplerStatesProperty()[0] = SamplerState::LinearClamp;
     }
     if (interiorPanelMaterial_)
     {
-        setMaterialSpecular(Vector3{0.12f,0.12f,0.105f},42.0f,
-                            Vector3{0.38f,0.36f,0.31f});
-        materialEffect_->setTextureProperty(interiorPanelDetailTexture_.get());
-        materialEffect_->setDiffuseColorProperty(Vector3::One);
-        device_.getSamplerStatesProperty()[0] = graphicsQuality_ >= 2
-            ? SamplerState::AnisotropicWrap : SamplerState::LinearWrap;
-        drawMaterialMesh(*interiorPanelMaterial_,trainWorld,view,projection,stats);
+        queueMaterial(*interiorPanelMaterial_,trainWorld,Light::Saloon,
+                      {.texture = interiorPanelDetailTexture_.get(), .sampler = detailSampler,
+                       .specular = Vector3{0.12f,0.12f,0.105f}, .power = 42.0f,
+                       .keySpecular = Vector3{0.38f,0.36f,0.31f}});
         stats.interiorPanelMaterialTriangles = interiorPanelMaterial_->triangles();
-        device_.getSamplerStatesProperty()[0] = SamplerState::LinearClamp;
     }
     if (interiorResilientMaterial_)
     {
-        setMaterialSpecular(Vector3{0.075f,0.075f,0.068f},24.0f,
-                            Vector3{0.31f,0.30f,0.26f});
-        materialEffect_->setTextureProperty(resilientFloorDetailTexture_.get());
-        materialEffect_->setDiffuseColorProperty(Vector3::One);
-        device_.getSamplerStatesProperty()[0] = graphicsQuality_ >= 2
-            ? SamplerState::AnisotropicWrap : SamplerState::LinearWrap;
-        drawMaterialMesh(*interiorResilientMaterial_,trainWorld,view,projection,stats);
+        queueMaterial(*interiorResilientMaterial_,trainWorld,Light::Saloon,
+                      {.texture = resilientFloorDetailTexture_.get(), .sampler = detailSampler,
+                       .specular = Vector3{0.075f,0.075f,0.068f}, .power = 24.0f,
+                       .keySpecular = Vector3{0.31f,0.30f,0.26f}});
         stats.interiorResilientMaterialTriangles = interiorResilientMaterial_->triangles();
-        device_.getSamplerStatesProperty()[0] = SamplerState::LinearClamp;
     }
     if (graphicsQuality_ >= 1 && interiorShadows_)
     {
-        effect_->setLightingEnabledProperty(false);
-        effect_->setDiffuseColorProperty(Vector3::One);
-        device_.setBlendStateProperty(BlendState::NonPremultiplied);
-        device_.setDepthStencilStateProperty(DepthStencilState::DepthRead);
-        drawMesh(*interiorShadows_,trainWorld,view,projection,stats);
+        queueVertex(*interiorShadows_,trainWorld,Light::Saloon,
+                    {.lit = false, .blend = BlendMode::AlphaBlend});
         stats.interiorContactShadowTriangles = interiorShadows_->triangles();
-        device_.setBlendStateProperty(BlendState::Opaque);
-        device_.setDepthStencilStateProperty(DepthStencilState::Default);
-        effect_->setLightingEnabledProperty(true);
     }
-    drawMesh(*interior_, trainWorld, view, projection, stats);
+    queueVertex(*interior_,trainWorld,Light::Saloon);
     if (interiorEmitters_)
-    {
-        effect_->setLightingEnabledProperty(false);
-        effect_->setDiffuseColorProperty(Vector3::One);
-        drawMesh(*interiorEmitters_,trainWorld,view,projection,stats);
-        effect_->setLightingEnabledProperty(true);
-    }
-    drawPrintedText(interiorLettering_,trainWorld);
+        queueVertex(*interiorEmitters_,trainWorld,Light::Saloon,{.lit = false});
+    queuePrintedText(interiorLettering_,trainWorld);
     stats.paSpeakerGrilles = paSpeakerGrilleCount_;
     stats.hvacVents = hvacVentCount_;
     stats.carIdentitySigns = carIdentitySignCount_;
@@ -1658,38 +1568,23 @@ RenderStats SceneRenderer::draw(const Matrix& view, const Matrix& projection, co
         const Matrix activeDisplayWorld = Matrix::CreateRotationY(
             operatingDirection < 0.0f ? kPi : 0.0f)
             * Matrix::CreateTranslation(0.0f,kTrainFloorElevation+1.51f,activeDisplayZ);
-        effect_->setLightingEnabledProperty(false);
-        drawMesh(*cabActiveDisplay_,activeDisplayWorld,view,projection,stats);
-        effect_->setLightingEnabledProperty(true);
+        queueVertex(*cabActiveDisplay_,activeDisplayWorld,Light::Saloon,{.lit = false});
         stats.activeCabDisplays = 1;
     }
     if (graphicsQuality_ >= 1 && interiorLightGradients_)
     {
-        effect_->setLightingEnabledProperty(false);
-        effect_->setDiffuseColorProperty(Vector3::One);
-        device_.setBlendStateProperty(BlendState::NonPremultiplied);
-        device_.setDepthStencilStateProperty(DepthStencilState::DepthRead);
-        drawMesh(*interiorLightGradients_,trainWorld,view,projection,stats);
+        queueVertex(*interiorLightGradients_,trainWorld,Light::Saloon,
+                    {.lit = false, .blend = BlendMode::AlphaBlend});
         stats.interiorLightGradientQuads = interiorLightGradientQuadCount_;
-        device_.setBlendStateProperty(BlendState::Opaque);
-        device_.setDepthStencilStateProperty(DepthStencilState::Default);
-        effect_->setLightingEnabledProperty(true);
     }
     const float sunlightAmount = std::clamp(1.0f-tunnelLightingMix_*1.05f,0.0f,1.0f)
         * (atmosphere_.direct >= 1.0f && atmosphere_.daylight >= 1.0f
            ? 1.0f : atmosphere_.direct*atmosphere_.sunDisc);
     if (sunlightAmount > 0.01f)
     {
-        effect_->setLightingEnabledProperty(false);
-        effect_->setAlphaProperty(sunlightAmount);
-        device_.setBlendStateProperty(BlendState::NonPremultiplied);
-        device_.setDepthStencilStateProperty(DepthStencilState::DepthRead);
-        drawMesh(*sunlightPatches_,trainWorld,view,projection,stats);
+        queueVertex(*sunlightPatches_,trainWorld,Light::Saloon,
+                    {.lit = false, .alpha = sunlightAmount, .blend = BlendMode::AlphaBlend});
         stats.sunlightPatches = sunlightPatchCount_;
-        effect_->setAlphaProperty(1.0f);
-        device_.setBlendStateProperty(BlendState::Opaque);
-        device_.setDepthStencilStateProperty(DepthStencilState::Default);
-        effect_->setLightingEnabledProperty(true);
     }
     const int displaySpeed = std::clamp(
         static_cast<int>(std::lround(service.speedMetresPerSecond * 3.6 / 5.0)) * 5, 0, 999);
@@ -1703,21 +1598,7 @@ RenderStats SceneRenderer::draw(const Matrix& view, const Matrix& projection, co
     if (!informationDisplays_ || informationDisplayState_ != displayState)
         rebuildInformationDisplays(route, service, displaySpeed, displayEta,
                                    informationDisplayPage);
-    passengerDisplayEffect_->setWorldProperty(trainWorld);
-    passengerDisplayEffect_->setViewProperty(view);
-    passengerDisplayEffect_->setProjectionProperty(projection);
-    device_.getSamplerStatesProperty()[0] = SamplerState::LinearClamp;
-    device_.setBlendStateProperty(BlendState::NonPremultiplied);
-    device_.setDepthStencilStateProperty(DepthStencilState::DepthRead);
-    for (auto& pass : passengerDisplayEffect_->getCurrentTechniqueProperty()->getPassesProperty())
-    {
-        pass.Apply();
-        informationDisplays_->draw(device_);
-        ++stats.drawCalls;
-        stats.triangles += informationDisplays_->triangles();
-    }
-    device_.setDepthStencilStateProperty(DepthStencilState::Default);
-    device_.setBlendStateProperty(BlendState::Opaque);
+    queuePrintedText(informationDisplays_,trainWorld);
 
     // Each car has a double sliding passenger door. Only the platform side opens; the opposing
     // side remains visibly interlocked. Player collision retains the onboard boundary.
@@ -1731,18 +1612,15 @@ RenderStats SceneRenderer::draw(const Matrix& view, const Matrix& projection, co
             const float openness = platformSide ? doorOpenAmount_ : 0.0f;
             const float panelOffset = 0.33f + openness * 0.63f;
             for (float panel : {-1.0f, 1.0f})
-            {
-                effect_->setDiffuseColorProperty(Vector3::One);
-                drawMesh(*passengerDoor_,
-                         Matrix::CreateRotationY(panel < 0.0f ? kPi : 0.0f)
-                             * Matrix::CreateTranslation(side * 1.455f,
-                                                         kTrainFloorElevation+1.17f,
-                                                         doorZ + panel * panelOffset),
-                         view, projection, stats);
-            }
-            drawBox(boxMatrix(side * 1.46f,kTrainFloorElevation+2.32f,doorZ,
-                              0.10f,0.08f,2.05f),
-                    view, projection, Color(230,181,40,255), stats);
+                queueVertex(*passengerDoor_,
+                            Matrix::CreateRotationY(panel < 0.0f ? kPi : 0.0f)
+                                * Matrix::CreateTranslation(side * 1.455f,
+                                                            kTrainFloorElevation+1.17f,
+                                                            doorZ + panel * panelOffset),
+                            Light::Saloon);
+            queueBox(boxMatrix(side * 1.46f,kTrainFloorElevation+2.32f,doorZ,
+                               0.10f,0.08f,2.05f),
+                     Color(230,181,40,255),Light::Saloon);
             // A small passenger door button gives an immediate, believable indication of which
             // side is released. It remains dark while the train is moving and turns amber during
             // the interlocked closing phase.
@@ -1750,12 +1628,10 @@ RenderStats SceneRenderer::draw(const Matrix& view, const Matrix& projection, co
                 : service.phase == Sim::ServicePhase::Dwelling ? Color(73,215,123,255)
                 : service.phase == Sim::ServicePhase::ClosingDoors ? Color(238,178,45,255)
                 : Color(49,58,60,255);
-            effect_->setDiffuseColorProperty(rgb(buttonColor));
-            drawMesh(*passengerDoorButton_,Matrix::CreateTranslation(
+            queueVertex(*passengerDoorButton_,Matrix::CreateTranslation(
                 side*1.45f,kTrainFloorElevation+1.36f,
                 doorZ-static_cast<float>(Sim::TrainInterior::PassengerDoorHalfOpening)),
-                view,projection,stats);
-            effect_->setDiffuseColorProperty(Vector3::One);
+                Light::Saloon,{.diffuse = rgb(buttonColor)});
             if (platformSide && openness > 0.01f)
             {
                 // Deploy before the leaves finish opening and overlap the platform coping by two
@@ -1767,8 +1643,7 @@ RenderStats SceneRenderer::draw(const Matrix& view, const Matrix& projection, co
                     * Matrix::CreateTranslation(side*static_cast<float>(
                         Sim::TrainInterior::BoardingStepInnerEdge),
                         kPlatformSurfaceElevation,doorZ);
-                effect_->setDiffuseColorProperty(Vector3::One);
-                drawMesh(*boardingStep_,stepWorld,view,projection,stats);
+                queueVertex(*boardingStep_,stepWorld,Light::Saloon);
                 ++stats.deployedBoardingSteps;
             }
         }
@@ -1776,18 +1651,17 @@ RenderStats SceneRenderer::draw(const Matrix& view, const Matrix& projection, co
 
     const Matrix doorWorld = Matrix::CreateRotationY(-1.45f * toiletDoorOpenAmount_)
                            * Matrix::CreateTranslation(0.37f,kTrainFloorElevation,4.07f);
-    drawMesh(*toiletDoor_, doorWorld, view, projection, stats);
+    queueVertex(*toiletDoor_,doorWorld,Light::Saloon);
     const Matrix indicatorWorld = boxMatrix(-0.067f,1.72f,-0.35f,0.038f,0.16f,0.18f)
                                 * doorWorld;
-    drawBox(indicatorWorld,view,projection,
-            toiletOccupied ? Color(210,55,45,255) : Color(57,177,91,255),stats);
+    queueBox(indicatorWorld,toiletOccupied ? Color(210,55,45,255) : Color(57,177,91,255),
+             Light::Saloon);
     stats.occupiedToiletIndicators = toiletOccupied ? 1 : 0;
 
     // A low-opacity tint plus a narrow highlight gives the windows readable glass without
-    // overpowering the scenery. DepthRead prevents transparent panes from occluding each other.
-    device_.setBlendStateProperty(BlendState::NonPremultiplied);
-    device_.setDepthStencilStateProperty(DepthStencilState::DepthRead);
-    effect_->setDiffuseColorProperty(Vector3::One);
+    // overpowering the scenery. DepthRead (every blended draw) prevents transparent panes from
+    // occluding each other.
+    const Surface glass{.blend = BlendMode::AlphaBlend};
     // Automatic inter-car leaves react to both the player and aisle actors. Their transparent
     // centre pane and opaque frame share one mesh and pass; distant boundaries are culled.
     for (int boundary = 0; boundary < Sim::TrainInterior::GangwayCount; ++boundary)
@@ -1796,11 +1670,11 @@ RenderStats SceneRenderer::draw(const Matrix& view, const Matrix& projection, co
         if (std::abs(playerZ - boundaryZ) > 38.0f) continue;
         const float openness = gangwayDoorOpenAmounts_[static_cast<std::size_t>(boundary)];
         for (float panel : {-1.0f, 1.0f})
-            drawMesh(*gangwayDoor_,
-                     Matrix::CreateTranslation(
-                         panel * (0.29f + openness * 0.64f),
-                         kTrainFloorElevation + 1.20f,boundaryZ),
-                     view,projection,stats);
+            queueVertex(*gangwayDoor_,
+                        Matrix::CreateTranslation(
+                            panel * (0.29f + openness * 0.64f),
+                            kTrainFloorElevation + 1.20f,boundaryZ),
+                        Light::Saloon,glass);
     }
     // Rain falls outside the cars only: the tile's empty corridor encloses the bodyshell, and
     // the opaque interior already occludes the streaks beyond the far wall (ENV-139).
@@ -1821,13 +1695,11 @@ RenderStats SceneRenderer::draw(const Matrix& view, const Matrix& projection, co
         const float reach = 45.0f+std::abs(shear)*kRainTileHeight*0.5f;
         const int firstTile = static_cast<int>(std::floor((eye.Z-reach-zScroll)/kRainTileLength));
         const int lastTile = static_cast<int>(std::floor((eye.Z+reach-zScroll)/kRainTileLength));
-        effect_->setLightingEnabledProperty(false);
-        effect_->setDiffuseColorProperty(Vector3{0.24f,0.26f,0.30f}*(1.0f-atmosphere_.daylight)
-                                         +Vector3::One*atmosphere_.daylight);
-        effect_->setAlphaProperty(std::min(1.0f,rainVisibility));
-        device_.setBlendStateProperty(BlendState::NonPremultiplied);
-        device_.setDepthStencilStateProperty(DepthStencilState::DepthRead);
-        device_.setRasterizerStateProperty(RasterizerState::CullNone);
+        const Surface streaks{.lit = false,
+                              .diffuse = Vector3{0.24f,0.26f,0.30f}*(1.0f-atmosphere_.daylight)
+                                         +Vector3::One*atmosphere_.daylight,
+                              .alpha = std::min(1.0f,rainVisibility),
+                              .blend = BlendMode::AlphaBlend, .doubleSided = true};
         Matrix shearAboutEye = Matrix::getIdentityProperty();
         shearAboutEye.M23 = shear;
         shearAboutEye.M43 = -shear*eye.Y;
@@ -1846,31 +1718,23 @@ RenderStats SceneRenderer::draw(const Matrix& view, const Matrix& projection, co
                     const Matrix placement = Matrix::CreateTranslation(
                         0.0f,eye.Y-yScroll+static_cast<float>(layer)*kRainTileHeight,
                         static_cast<float>(tile)*kRainTileLength+zScroll) * shearAboutEye;
-                    drawMesh(*rainStreaks_[half],placement,view,projection,stats);
+                    queueVertex(*rainStreaks_[half],placement,Light::Saloon,streaks);
                     ++stats.rainStreakDraws;
                 }
         }
-        device_.setRasterizerStateProperty(RasterizerState::CullCounterClockwise);
-        effect_->setAlphaProperty(1.0f);
-        effect_->setDiffuseColorProperty(Vector3::One);
-        effect_->setLightingEnabledProperty(true);
     }
-    drawMesh(*passengerDoorGlass_,trainWorld,view,projection,stats);
-    drawMesh(*windowGlass_, trainWorld, view, projection, stats);
+    queueVertex(*passengerDoorGlass_,trainWorld,Light::Saloon,glass);
+    queueVertex(*windowGlass_,trainWorld,Light::Saloon,glass);
     if (rainDroplets_ && atmosphere_.rain > 0.02f)
     {
         // Beads persist on the glass while it rains, lit by the cabin as much as the sky.
-        effect_->setLightingEnabledProperty(false);
-        effect_->setDiffuseColorProperty(Vector3{0.55f,0.56f,0.58f}*(1.0f-atmosphere_.daylight)
-                                         +Vector3::One*atmosphere_.daylight);
-        effect_->setAlphaProperty(std::min(1.0f,atmosphere_.rain*1.2f));
-        device_.setRasterizerStateProperty(RasterizerState::CullNone);
-        drawMesh(*rainDroplets_,trainWorld,view,projection,stats);
+        queueVertex(*rainDroplets_,trainWorld,Light::Saloon,
+                    {.lit = false,
+                     .diffuse = Vector3{0.55f,0.56f,0.58f}*(1.0f-atmosphere_.daylight)
+                                +Vector3::One*atmosphere_.daylight,
+                     .alpha = std::min(1.0f,atmosphere_.rain*1.2f),
+                     .blend = BlendMode::AlphaBlend, .doubleSided = true});
         stats.rainDropletTriangles = rainDroplets_->triangles();
-        device_.setRasterizerStateProperty(RasterizerState::CullCounterClockwise);
-        effect_->setAlphaProperty(1.0f);
-        effect_->setDiffuseColorProperty(Vector3::One);
-        effect_->setLightingEnabledProperty(true);
     }
     if (graphicsQuality_ >= 1)
     {
@@ -1878,14 +1742,13 @@ RenderStats SceneRenderer::draw(const Matrix& view, const Matrix& projection, co
         // while looking along the pane. It modulates only restrained reflection accents, never
         // the transparent base glass or exterior scene.
         const float faceOn = std::abs(std::sin(cameraYaw));
-        effect_->setAlphaProperty(0.13f+(1.0f-faceOn)*0.25f);
         for (auto& reflections : windowReflections_)
-            if (reflections) drawMesh(*reflections,trainWorld,view,projection,stats);
-        effect_->setAlphaProperty(1.0f);
+            if (reflections)
+                queueVertex(*reflections,trainWorld,Light::Saloon,
+                            {.alpha = 0.13f+(1.0f-faceOn)*0.25f, .blend = BlendMode::AlphaBlend});
         stats.windowReflectionAccents = windowReflectionAccentCount_;
     }
-    device_.setBlendStateProperty(BlendState::Opaque);
-    device_.setDepthStencilStateProperty(DepthStencilState::Default);
+    render();
     stats.avatarVisuals = static_cast<int>(avatars_.size());
     stats.readyAvatarVisuals = static_cast<int>(std::count_if(
         avatars_.begin(),avatars_.end(),[](const auto& avatar) {

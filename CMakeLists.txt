@@ -146,6 +146,7 @@ if(TRAINSIM_BUILD_GAME)
         src/render/MeshBuilder.cpp
         src/render/ProceduralMaterials.cpp
         src/render/SceneAvatars.cpp
+        src/render/SceneBinder.cpp
         src/render/SceneRenderer.cpp
         src/render/SceneStreaming.cpp
         src/render/TrackGeometryBuild.cpp

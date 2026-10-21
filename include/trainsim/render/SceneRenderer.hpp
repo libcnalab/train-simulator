@@ -9,11 +9,17 @@
 #include "trainsim/render/Atmosphere.hpp"
 #include "trainsim/render/WorldGeometry.hpp"
 
+#include "CnaEngine/Graphics/Camera.hpp"
+#include "CnaEngine/Graphics/ForwardRenderer.hpp"
+#include "CnaEngine/Graphics/Material.hpp"
+#include "CnaEngine/Graphics/RenderQueue.hpp"
+
 #include "Microsoft/Xna/Framework/Color.hpp"
 #include "Microsoft/Xna/Framework/Matrix.hpp"
 
 #include <array>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -255,6 +261,49 @@ public:
                      float playerX, float playerZ, float cameraYaw);
 
 private:
+    // How one queued draw sets up the scene's effects (its RenderItem's userData); the engine
+    // Material carries the rest: blend, culling, sampler, texture, colour, alpha, lighting on/off,
+    // specular and fog.
+    struct Look
+    {
+        // Vertex: vertex-coloured batches on effect_; Material: detail-textured materials on
+        // materialEffect_; Lettering: the dot-matrix font; Spray: alpha-tested foliage cards;
+        // Water and Facade: the OpenGL 3.3 shaders, configured from materialEffect_.
+        enum class Effect : std::uint8_t { Vertex, Material, Lettering, Spray, Water, Facade };
+        // Outdoor: sun, ground bounce and sky uplight; Saloon: the cars' ceiling strips;
+        // Floodlit: platform lamps after dark with the outdoor bounce and uplight.
+        enum class Light : std::uint8_t { Outdoor, Saloon, Floodlit };
+        Effect effect = Effect::Vertex;
+        Light light = Light::Outdoor;
+        // Material, Water and Facade: the sun's specular colour on this material.
+        Microsoft::Xna::Framework::Vector3 keySpecular{0.0f,0.0f,0.0f};
+    };
+    // Lighting and time shared by this frame's queued draws.
+    struct FrameLighting
+    {
+        Microsoft::Xna::Framework::Vector3 daylight{0.0f,-1.0f,0.0f};
+        Microsoft::Xna::Framework::Vector3 bounceDirection{0.0f,1.0f,0.0f};
+        Microsoft::Xna::Framework::Vector3 uplightDirection{0.0f,1.0f,0.0f};
+        ExteriorLighting outdoor{};
+        ExteriorLighting floodlit{};
+        Microsoft::Xna::Framework::Vector3 fogColour{0.0f,0.0f,0.0f};
+        float fogStart = 0.0f;
+        float fogEnd = 1.0f;
+        Microsoft::Xna::Framework::Vector3 waterSky{0.0f,0.0f,0.0f};
+        float sunSparkle = 0.0f;
+        double serviceSeconds = 0.0;
+    };
+    class Binder;
+    // Queues every segment of `mesh` in the sequenced bucket and counts one draw, as the
+    // immediate drawMesh does. The material and look must live until render().
+    void queue(const GpuMesh& mesh, const Microsoft::Xna::Framework::Matrix& world,
+               const CnaEngine::Graphics::Material& material, const Look& look, RenderStats& stats);
+    // Storage for this frame's materials and looks, kept until the next frame starts.
+    CnaEngine::Graphics::Material& frameMaterial();
+    const Look& frameLook(const Look& look);
+    // Draws the queued items in submission order and empties the queue.
+    void render();
+
     void buildInterior();
     void updateTrack(const Sim::Route& route, const Sim::ServiceState& service);
     void updateStaticWorld(const Sim::Route& route, const World::StreamingWorld& world,
@@ -266,12 +315,10 @@ private:
                                     const Sim::ServiceState& service,
                                     std::size_t stationIndex, int etaMinutes,
                                     double scheduleDeviationSeconds);
+    // Immediate drawing on effect_ for the sky and the people, around the queued world and train.
     void drawMesh(GpuMesh& mesh, const Microsoft::Xna::Framework::Matrix& world,
                   const Microsoft::Xna::Framework::Matrix& view,
                   const Microsoft::Xna::Framework::Matrix& projection, RenderStats& stats);
-    void drawMaterialMesh(GpuMesh& mesh, const Microsoft::Xna::Framework::Matrix& world,
-                          const Microsoft::Xna::Framework::Matrix& view,
-                          const Microsoft::Xna::Framework::Matrix& projection, RenderStats& stats);
     void drawBox(const Microsoft::Xna::Framework::Matrix& world,
                  const Microsoft::Xna::Framework::Matrix& view,
                  const Microsoft::Xna::Framework::Matrix& projection,
@@ -286,10 +333,8 @@ private:
                             const Microsoft::Xna::Framework::Matrix& projection,
                             const Sim::Route& route, const Sim::ServiceState& service,
                             RenderStats& stats);
-    void drawStationClock(const Microsoft::Xna::Framework::Matrix& view,
-                          const Microsoft::Xna::Framework::Matrix& projection,
-                          const Sim::Route& route, const Sim::ServiceState& service,
-                          RenderStats& stats);
+    void queueStationClock(const Sim::Route& route, const Sim::ServiceState& service,
+                           RenderStats& stats);
     void addNextAvatarVisual();
 
     Microsoft::Xna::Framework::Graphics::GraphicsDevice& device_;
@@ -388,6 +433,16 @@ private:
     std::unique_ptr<GpuMesh> gangwayDoor_;
     std::unique_ptr<GpuMesh> cabActiveDisplay_;
     std::unique_ptr<GpuMesh> toiletDoor_;
+
+    // The world and the train are queued in their hand-ordered sequence and drawn by
+    // cna-engine's renderer through Binder, which configures the effects above.
+    std::unique_ptr<CnaEngine::Graphics::ForwardRenderer> renderer_;
+    std::shared_ptr<Binder> binder_;
+    CnaEngine::Graphics::RenderQueue queue_;
+    CnaEngine::Graphics::Camera camera_;
+    FrameLighting frame_;
+    std::deque<CnaEngine::Graphics::Material> frameMaterials_;
+    std::deque<Look> frameLooks_;
 
     struct AvatarVisual;
     struct InformationDisplayState

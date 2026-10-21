@@ -1,5 +1,4 @@
 #include "trainsim/render/OpenGL33FacadeEffect.hpp"
-#include "trainsim/render/GpuMesh.hpp"
 #include "Microsoft/Xna/Framework/Graphics/ShaderEffect.hpp"
 #include "Microsoft/Xna/Framework/Graphics/BasicEffect.hpp"
 #include "Microsoft/Xna/Framework/Graphics/GraphicsDevice.hpp"
@@ -72,7 +71,7 @@ OpenGL33FacadeEffect::OpenGL33FacadeEffect(GraphicsDevice& device)
     if (!effect_->IsEffectValid()) throw std::runtime_error("OpenGL33 facade comparison shader failed to compile");
 }
 OpenGL33FacadeEffect::~OpenGL33FacadeEffect()=default;
-void OpenGL33FacadeEffect::draw(GpuMesh& mesh,GraphicsDevice& device,BasicEffect& reference,
+void OpenGL33FacadeEffect::apply(GraphicsDevice& device,BasicEffect& reference,
     const Matrix& world,const Matrix& view,const Matrix& projection,bool linear)
 {
     effect_->setWorldProperty(world); effect_->setViewProperty(view); effect_->setProjectionProperty(projection);
@@ -100,6 +99,5 @@ void OpenGL33FacadeEffect::draw(GpuMesh& mesh,GraphicsDevice& device,BasicEffect
         -shift/static_cast<float>(viewport.getHeightProperty()));
     effect_->SetTexture(0,*reference.getTextureProperty());
     effect_->SetUniformInt("materialTexture",0);
-    mesh.draw(device);
 }
 }

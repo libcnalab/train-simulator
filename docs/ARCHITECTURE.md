@@ -1242,6 +1242,7 @@ constants such as `kPlatformSeatedRootDrop` and the avatar budgets):
 | File | Contents |
 | --- | --- |
 | `SceneRenderer.cpp` | construction of shared meshes and effects, the per-frame `draw` pass order |
+| `SceneBinder.cpp` | how a queued draw configures the scene's effects (see below) |
 | `SceneAvatars.cpp` | onboard and platform avatars, platform population and lighting |
 | `SceneStreaming.cpp` | world and track streaming state, staged uploads and swaps |
 | `WorldGeometryBuild.cpp` | `WorldGeometry::build` and `WorldBuildContext` (chunks in parallel, then stations) |
@@ -1250,6 +1251,28 @@ constants such as `kPlatformSeatedRootDrop` and the avatar budgets):
 
 Reusable geometry stays in headers under `include/trainsim/render/` with unit tests in
 `tests/MeshBuilderTests.cpp`.
+
+### Drawing through cna-engine
+
+The scene's look depends on its hand-written order: contact shadows, lettering, glows, light
+gradients and glass are blended between opaque layers without writing depth, so a later opaque
+layer behind them still covers them. `draw` therefore keeps that order but no longer sets device
+states itself. The sky, sun, moon and clouds are drawn directly first; everything else is queued
+in cna-engine's `RenderBucket::Sequenced` (submission order) and drawn by its `ForwardRenderer` in
+two runs, the world before the people (`drawAvatars`, `drawPlatformPeople`, still direct) and the
+station clocks and the train after them.
+
+Each queued draw is a `GpuMesh` segment (a borrowed `CnaEngine::Graphics::GpuMesh`), an engine
+`Material` and a `Look`. The material states what the renderer needs — blend (opaque, alpha
+test, straight-alpha `AlphaBlend` or `Additive`; every blended draw uses DepthRead), culling
+(`doubleSided`), the sampler — and the texture, colour, alpha, lighting on/off, specular and fog.
+The `Look` names which of the scene's effects draws it (`effect_`, `materialEffect_`, the
+lettering font, the alpha-tested sprays, or the water and facade shaders configured from
+`materialEffect_`) and its light (outdoor, saloon or floodlit platform) and the sun's specular
+colour on materials. `SceneRenderer::Binder` (an engine `IMaterialBinder`) sets those effects up
+from both and from the frame's lighting, exactly as the former passes did: the 37 visual-audit
+views and 17 more (night, rain, fog, quality levels, facade shaders, HUD) are pixel-identical to
+the hand-drawn renderer under `--lockstep`, and every `--report-state` counter is unchanged.
 
 ## Oncoming traffic (ENV-137)
 
