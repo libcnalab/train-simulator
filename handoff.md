@@ -1,7 +1,9 @@
 # Train Simulator — AI development handoff
 
 Updated: 2026-10-12 late evening (the whole goal list is implemented, documented, verified and,
-with the owner's approval, committed and pushed to `origin/develop` as `de92449`).
+with the owner's approval, committed and pushed to `origin/develop` as `de92449`); on
+2026-10-21 the game was moved onto cna-engine on the branch `engine-adoption` (see "cna-engine
+adoption" below).
 Repository: `libcna/train-simulator`, current branch `develop`. Written for the next agent
 (expected: Codex, "astra high") starting from a fresh context.
 
@@ -49,6 +51,9 @@ Repository: `libcna/train-simulator`, current branch `develop`. Written for the 
   and repairs of defects its captures exposed. The owner then asked to commit and push
   everything; that is done (`de92449` on `origin/develop`). Do not start further work without a
   new instruction.
+- 2026-10-21: working in `libcna/cna-engine`, the owner asked (Czech) "migrate the train
+  simulator" onto cna-engine. Done on the branch `engine-adoption` (worktree
+  `libcnalab/train-simulator-engine`), not merged or pushed; see "cna-engine adoption" below.
 - The owner's conversation is Czech; all repository content, commit messages
   and this document are English.
 
@@ -230,6 +235,40 @@ Key facts for the next agent:
 - Known limits: no wet surfaces/puddles/snow/lightning; the player train's exterior keeps saloon
   lighting at night (audit cameras only); an oncoming service still appears/vanishes at the ends
   of its 1.9 km traversal.
+
+## cna-engine adoption (2026-10-21, branch `engine-adoption`)
+
+The game uses [cna-engine](https://github.com/libcna/cna-engine)'s strict modules (XNA 4.0 types
+only) from a third sibling checkout, `../cna-engine` (`-DTRAINSIM_CNA_ENGINE_ROOT=`); they need CNA
+built statically, which the build forces. One commit per step, each checked against the step
+before it:
+
+| Step | Moved onto the engine | Stays the game's |
+| --- | --- | --- |
+| lockstep | — (`--lockstep`: one 1/60 s step per drawn frame, so captures repeat) | — |
+| build | `CnaEngine::Graphics` linked; CNA static | the install verifier now rejects a shared `libcna` |
+| screenshots | `CaptureBackBuffer` (reads bytes, writes the PNG) | — |
+| camera | `Camera::SetLookAt`/`SetPerspective` for the eye and the audit pose | the eye's sway, lean and seat blend |
+| meshes | each `GpuMesh` segment is drawn as a borrowed engine `GpuMesh` | streaming, staging, buffer reuse |
+| system keys | `ActionMap` (start, quit, pause, map, HUD, help, diagnostics, freeze, teleports, menu arrows, use) | walking and mouse look |
+| scene | the world, the station clocks and the train are queued in the engine's `Sequenced` bucket and drawn by its `ForwardRenderer`; `SceneRenderer::Binder` configures the scene's effects (`docs/ARCHITECTURE.md`, "Drawing through cna-engine") | the sky, sun, moon and clouds, the people, the HUD; all effects and shaders |
+
+`FrameTiming` stays the game's: its report needs the lifetime maximum and exact window means,
+which cna-engine's `FrameStatistics` (a running sum in seconds) does not give.
+
+Verification, against CNA `900d0db3b`, sharp-runtime `f2aecfef` and easy-gl `v0.1.1` (system SDL
+from the CNA checkout), Release, three jobs: 56 lockstep captures (the 37 visual-audit views, night,
+dusk, rain, fog, overcast, quality 0 and 1, both facade shaders, avatars, the HUD overlays). Two
+runs of the unchanged game differed in 30 views before `--lockstep` and in the two onboard avatar
+views after it (avatars load asynchronously while their animation advances per drawn frame); the
+other 54 are pixel-identical after every step under Xvfb (llvmpipe) and, comparing the first and
+the last step, on the Radeon 780M (`SDL_VIDEODRIVER=offscreen` without a display). Every
+`--report-state` counter is unchanged; uncapped GPU frame times stayed within the noise (about
+5 ms). Real X11 key presses (start menu, M, F1, Esc, the pause-menu arrows, E, F12) behave as
+before. Both unit binaries pass (134 and 200). CTest: 73 of 75; `trainsim_world_prefetch_-1`
+fails the same way before the first step (two synchronous world builds where one is expected) and
+`trainsim_install_layout` cannot pass with the system SDL used here (it installs the project-local
+SDL build). Not checked: the WebGL 2 build, which now also compiles the engine.
 
 ## Known open issues (outside the ranked list)
 
