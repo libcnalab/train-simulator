@@ -53,7 +53,9 @@ Repository: `libcna/train-simulator`, current branch `develop`. Written for the 
   new instruction.
 - 2026-10-21: working in `libcna/cna-engine`, the owner asked (Czech) "migrate the train
   simulator" onto cna-engine. Done on the branch `engine-adoption` (worktree
-  `libcnalab/train-simulator-engine`), not merged or pushed; see "cna-engine adoption" below.
+  `libcnalab/train-simulator-engine`); at the owner's request it was fast-forwarded into
+  `develop` and pushed the same day, after cna-engine's `develop`. See "cna-engine adoption"
+  below.
 - The owner's conversation is Czech; all repository content, commit messages
   and this document are English.
 
