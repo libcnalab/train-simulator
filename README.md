@@ -251,6 +251,10 @@ output rather than external art assets and may be refreshed as the procedural ar
 | Esc | Pause simulation and audio, release mouse, and open the comfort menu |
 | F12 | Quit |
 
+The keys other than walking are named actions in cna-engine's `ActionMap` (`bindControls()` in
+`TrainSimulatorGame.cpp`); an action fires when it goes down, so holding one of two keys bound to
+the same action (Enter and Space on the start menu) and pressing the other does not fire it again.
+
 There is deliberately no jump action and no way for the player to leave the train or enter a cab.
 On a normal desktop launch, a compact prompt remains visible until the first left click captures
 the mouse; `Esc` releases it again.

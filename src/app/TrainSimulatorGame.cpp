@@ -175,6 +175,7 @@ TrainSimulatorGame::TrainSimulatorGame(LaunchOptions options)
     // Lockstep uses CNA's variable-step loop for one Update per Draw; stepSeconds() then gives
     // every step the fixed-step duration instead of the measured one.
     setIsFixedTimeStepProperty(options_.fixedTimeStep && !options_.lockstep);
+    bindControls();
     showHelp_ = options_.startWithHelp;
     showMap_ = options_.startWithMap;
     inspectDisplay_ = options_.startWithDisplayInspection;
@@ -799,13 +800,44 @@ void TrainSimulatorGame::LoadContent()
         }
     }
     applyEnvironmentSettings();
-    previousKeyboard_ = Keyboard::GetState();
+    // Keys already held at launch do not count as pressed.
     previousMouse_ = Mouse::GetState();
+    updateControls(Keyboard::GetState(), previousMouse_);
 }
 
-bool TrainSimulatorGame::pressed(const KeyboardState& now, Keys key) const
+void TrainSimulatorGame::bindControls()
 {
-    return now.IsKeyDown(key) && previousKeyboard_.IsKeyUp(key);
+    using CnaEngine::Input::Binding;
+    const auto action = [&](const char* name, std::initializer_list<Keys> keys) {
+        const CnaEngine::Input::ActionId id = controls_.AddAction(name);
+        for (const Keys key : keys) controls_.Bind(id, Binding::ForKey(key));
+        return id;
+    };
+    actions_.start = action("Start", {Keys::Enter, Keys::Space});
+    // CNA reserves F9/F10 for renderer context-loss diagnostics before game input is updated.
+    // Keep the player-facing quit binding away from those dependency-owned debug hotkeys.
+    actions_.quit = action("Quit", {Keys::F12});
+    actions_.pause = action("Pause", {Keys::Escape});
+    actions_.map = action("Map", {Keys::M});
+    actions_.hud = action("PassengerHud", {Keys::H});
+    actions_.help = action("Help", {Keys::F1});
+    actions_.debug = action("Debug", {Keys::F3});
+    actions_.freeze = action("FreezeService", {Keys::F5});
+    actions_.previousStation = action("PreviousStation", {Keys::F6});
+    actions_.nextStation = action("NextStation", {Keys::F7});
+    actions_.menuUp = action("MenuUp", {Keys::Up});
+    actions_.menuDown = action("MenuDown", {Keys::Down});
+    actions_.menuLeft = action("MenuLeft", {Keys::Left});
+    actions_.menuRight = action("MenuRight", {Keys::Right});
+    actions_.use = action("Use", {Keys::E});
+}
+
+void TrainSimulatorGame::updateControls(const KeyboardState& keyboard, const MouseState& mouse)
+{
+    CnaEngine::Input::InputSnapshot snapshot;
+    snapshot.keyboard = keyboard;
+    snapshot.mouse = mouse;
+    controls_.Update(snapshot);
 }
 
 bool TrainSimulatorGame::playerInsideToilet() const noexcept
@@ -1328,13 +1360,13 @@ void TrainSimulatorGame::Update(GameTime& gameTime)
     const float dt = stepSeconds(gameTime);
     const KeyboardState keyboard = Keyboard::GetState();
     const MouseState mouse = Mouse::GetState();
+    updateControls(keyboard, mouse);
 
     // A finite QA run freezes its authoritative state once the requested frame has been drawn,
     // but may need a few additional render-only frames to let CNA's asynchronous avatar loader
     // become idle. This preserves --frames semantics while avoiding teardown during a load.
     if (finishingAvatarWarmup_)
     {
-        previousKeyboard_ = keyboard;
         previousMouse_ = mouse;
         Game::Update(gameTime);
         return;
@@ -1352,16 +1384,15 @@ void TrainSimulatorGame::Update(GameTime& gameTime)
             && mouse.getLeftButtonProperty() == ButtonState::Released
             && previousMouse_.getLeftButtonProperty() == ButtonState::Pressed
             && button.contains(mouse.getXProperty(),mouse.getYProperty());
-        if (clicked || pressed(keyboard, Keys::Enter) || pressed(keyboard, Keys::Space))
+        if (clicked || controls_.Pressed(actions_.start))
             leaveStartMenu();
-        if (pressed(keyboard, Keys::F12)) Exit();
-        previousKeyboard_ = keyboard;
+        if (controls_.Pressed(actions_.quit)) Exit();
         previousMouse_ = mouse;
         Game::Update(gameTime);
         return;
     }
 
-    if (pressed(keyboard, Keys::Escape))
+    if (controls_.Pressed(actions_.pause))
     {
         paused_ = !paused_;
         if (audio_) audio_->setPaused(paused_);
@@ -1370,15 +1401,13 @@ void TrainSimulatorGame::Update(GameTime& gameTime)
             releaseMouseCapture(false);
         }
     }
-    // CNA reserves F9/F10 for renderer context-loss diagnostics before game input is updated.
-    // Keep the player-facing quit binding away from those dependency-owned debug hotkeys.
-    if (pressed(keyboard, Keys::F12)) Exit();
-    if (pressed(keyboard, Keys::M)) showMap_ = !showMap_;
-    if (pressed(keyboard, Keys::H)) showPassengerHud_ = !showPassengerHud_;
-    if (pressed(keyboard, Keys::F1)) showHelp_ = !showHelp_;
-    if (pressed(keyboard, Keys::F3)) showDebug_ = !showDebug_;
-    if (pressed(keyboard, Keys::F5)) service_.freeze(!service_.frozen());
-    if (pressed(keyboard, Keys::F6))
+    if (controls_.Pressed(actions_.quit)) Exit();
+    if (controls_.Pressed(actions_.map)) showMap_ = !showMap_;
+    if (controls_.Pressed(actions_.hud)) showPassengerHud_ = !showPassengerHud_;
+    if (controls_.Pressed(actions_.help)) showHelp_ = !showHelp_;
+    if (controls_.Pressed(actions_.debug)) showDebug_ = !showDebug_;
+    if (controls_.Pressed(actions_.freeze)) service_.freeze(!service_.frozen());
+    if (controls_.Pressed(actions_.previousStation))
     {
         passengers_.resetStationCycleForTeleport();
         passengerDoorsOpenRealSeconds_ = 0.0;
@@ -1388,7 +1417,7 @@ void TrainSimulatorGame::Update(GameTime& gameTime)
         service_.teleportToStation(station, -1);
         streaming_.update(service_.state().routeDistanceMetres);
     }
-    if (pressed(keyboard, Keys::F7))
+    if (controls_.Pressed(actions_.nextStation))
     {
         passengers_.resetStationCycleForTeleport();
         passengerDoorsOpenRealSeconds_ = 0.0;
@@ -1401,12 +1430,12 @@ void TrainSimulatorGame::Update(GameTime& gameTime)
     if (paused_)
     {
         constexpr int pauseItems = 12;
-        if (pressed(keyboard, Keys::Up))
+        if (controls_.Pressed(actions_.menuUp))
             pauseSelection_ = (pauseSelection_ + pauseItems - 1) % pauseItems;
-        if (pressed(keyboard, Keys::Down))
+        if (controls_.Pressed(actions_.menuDown))
             pauseSelection_ = (pauseSelection_ + 1) % pauseItems;
-        const float direction = pressed(keyboard, Keys::Left) ? -1.0f
-                              : pressed(keyboard, Keys::Right) ? 1.0f : 0.0f;
+        const float direction = controls_.Pressed(actions_.menuLeft) ? -1.0f
+                              : controls_.Pressed(actions_.menuRight) ? 1.0f : 0.0f;
         if (direction != 0.0f && pauseSelection_ == 0)
             settings_.fieldOfViewDegrees = std::clamp(
                 settings_.fieldOfViewDegrees + direction * 5.0f, 55.0f, 100.0f);
@@ -1457,7 +1486,7 @@ void TrainSimulatorGame::Update(GameTime& gameTime)
         }
         if (direction != 0.0f) persistSettings();
     }
-    if (pressed(keyboard, Keys::E) && !paused_ && !showMap_ && !showHelp_) interact();
+    if (controls_.Pressed(actions_.use) && !paused_ && !showMap_ && !showHelp_) interact();
 
     if (!paused_)
     {
@@ -1575,7 +1604,6 @@ void TrainSimulatorGame::Update(GameTime& gameTime)
                       << std::endl;
         }
     }
-    previousKeyboard_ = keyboard;
     previousMouse_ = mouse;
     Game::Update(gameTime);
 }

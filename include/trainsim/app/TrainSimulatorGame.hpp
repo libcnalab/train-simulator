@@ -11,6 +11,7 @@
 #include "trainsim/world/StreamingWorld.hpp"
 
 #include "CnaEngine/Graphics/Camera.hpp"
+#include "CnaEngine/Input/ActionMap.hpp"
 
 #include "Microsoft/Xna/Framework/Game.hpp"
 #include "Microsoft/Xna/Framework/GraphicsDeviceManager.hpp"
@@ -93,8 +94,10 @@ protected:
 private:
     // Seconds one Update or Draw advances: the measured step, or the fixed one in lockstep.
     [[nodiscard]] float stepSeconds(const Microsoft::Xna::Framework::GameTime& gameTime);
-    [[nodiscard]] bool pressed(const Microsoft::Xna::Framework::Input::KeyboardState& now,
-                               Microsoft::Xna::Framework::Input::Keys key) const;
+    void bindControls();
+    // Feeds this update's keyboard and mouse to the action map.
+    void updateControls(const Microsoft::Xna::Framework::Input::KeyboardState& keyboard,
+                        const Microsoft::Xna::Framework::Input::MouseState& mouse);
     [[nodiscard]] bool playerInsideToilet() const noexcept;
     [[nodiscard]] bool toiletDoorEffectivelyOpen() const noexcept;
     [[nodiscard]] bool canOccupy(float x, float z) const;
@@ -140,7 +143,13 @@ private:
     std::unique_ptr<Microsoft::Xna::Framework::Graphics::Texture2D> whitePixel_;
     std::unique_ptr<Render::BitmapFont> font_;
 
-    Microsoft::Xna::Framework::Input::KeyboardState previousKeyboard_;
+    // System keys as named actions; walking (W A S D) and mouse look read the devices directly.
+    CnaEngine::Input::ActionMap controls_;
+    struct Actions
+    {
+        CnaEngine::Input::ActionId start, quit, pause, map, hud, help, debug, freeze,
+            previousStation, nextStation, menuUp, menuDown, menuLeft, menuRight, use;
+    } actions_{};
     Microsoft::Xna::Framework::Input::MouseState previousMouse_;
     bool mouseCaptured_ = false;
     std::uint32_t relativeMouseModeAcquireCount_ = 0;
