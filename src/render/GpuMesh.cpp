@@ -7,7 +7,6 @@
 #include "Microsoft/Xna/Framework/Graphics/GraphicsDevice.hpp"
 #include "Microsoft/Xna/Framework/Graphics/IndexBuffer.hpp"
 #include "Microsoft/Xna/Framework/Graphics/IndexElementSize.hpp"
-#include "Microsoft/Xna/Framework/Graphics/PrimitiveType.hpp"
 #include "Microsoft/Xna/Framework/Graphics/VertexBuffer.hpp"
 #include "Microsoft/Xna/Framework/Graphics/VertexDeclaration.hpp"
 #include "Microsoft/Xna/Framework/Graphics/VertexElement.hpp"
@@ -39,6 +38,18 @@ const VertexDeclaration& litColorDeclaration()
 }
 
 GpuMesh::GpuMesh() : streamed_(true) {}
+
+void GpuMesh::refreshView(Segment& segment)
+{
+    using CnaEngine::Graphics::VertexAttribute;
+    segment.view = segment.vertices && segment.indices && segment.vertexCount > 0
+                       && segment.primitiveCount > 0
+        ? CnaEngine::Graphics::GpuMesh::Borrow(*segment.vertices,*segment.indices,
+              segment.vertexCount,segment.primitiveCount,{},
+              {VertexAttribute::Position,VertexAttribute::Normal,VertexAttribute::Color,
+               VertexAttribute::TexCoord0})
+        : CnaEngine::Graphics::GpuMesh{};
+}
 
 GpuMesh::GpuMesh(GraphicsDevice& device, const MeshData& data, bool streamed)
     : streamed_(streamed)
@@ -75,6 +86,7 @@ int GpuMesh::upload(GraphicsDevice& device,const MeshData& data,const MeshSegmen
         segment.indices->SetData(indexData,primitives*3);
         segment.vertexCount=vertices;
         segment.primitiveCount=primitives;
+        refreshView(segment);
         return 0;
     }
     const int reused=(segment.vertices && vertices == segment.vertexCount ? 1 : 0)
@@ -91,6 +103,7 @@ int GpuMesh::upload(GraphicsDevice& device,const MeshData& data,const MeshSegmen
         indexData,0,primitives*3,SetDataOptions::Discard);
     segment.vertexCount=vertices;
     segment.primitiveCount=primitives;
+    refreshView(segment);
     return reused;
 }
 
@@ -142,6 +155,7 @@ bool GpuMesh::stageSegment(GraphicsDevice& device,const MeshData& data,
                                                                  primitives*3,BufferUsage::WriteOnly);
         segment.vertexCount=vertices;
         segment.primitiveCount=primitives;
+        refreshView(segment);
     }
     std::size_t budget=std::max<std::size_t>(maxBytes,sizeof(LitColorVertex)*3);
     if (segment.stagedVertices<range.vertexCount)
@@ -189,14 +203,7 @@ int GpuMesh::triangles() const noexcept
 
 void GpuMesh::draw(GraphicsDevice& device) const
 {
-    for (const auto& segment : segments_)
-    {
-        if (!segment.vertices || segment.primitiveCount<=0) continue;
-        device.SetVertexBuffer(segment.vertices.get());
-        device.SetIndexBuffer(segment.indices.get());
-        device.DrawIndexedPrimitives(PrimitiveType::TriangleList,0,0,segment.vertexCount,0,
-                                     segment.primitiveCount);
-    }
+    for (const auto& segment : segments_) segment.view.Draw(device);
 }
 
 } // namespace TrainSim::Render

@@ -2,6 +2,8 @@
 
 #include "trainsim/render/MeshBuilder.hpp"
 
+#include "CnaEngine/Graphics/GpuMesh.hpp"
+
 #include <memory>
 #include <span>
 #include <vector>
@@ -48,6 +50,11 @@ public:
     void draw(Microsoft::Xna::Framework::Graphics::GraphicsDevice& device) const;
     [[nodiscard]] int triangles() const noexcept;
     [[nodiscard]] std::size_t segmentCount() const noexcept { return segments_.size(); }
+    // One segment as cna-engine draws it: its buffers, borrowed. Not drawable while empty.
+    [[nodiscard]] const CnaEngine::Graphics::GpuMesh& segment(std::size_t index) const
+    {
+        return segments_.at(index).view;
+    }
 
 private:
     struct Segment
@@ -58,7 +65,11 @@ private:
         int primitiveCount = 0;
         std::size_t stagedVertices = 0;
         std::size_t stagedIndices = 0;
+        // Refreshed whenever the buffers or counts change. Bounds are not tracked: nothing
+        // culls or sorts these meshes by them.
+        CnaEngine::Graphics::GpuMesh view;
     };
+    static void refreshView(Segment& segment);
     int upload(Microsoft::Xna::Framework::Graphics::GraphicsDevice& device,const MeshData& data,
                const MeshSegment& range,Segment& segment);
     std::vector<Segment> segments_;
