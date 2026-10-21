@@ -59,7 +59,6 @@ elseif(MSVC)
 endif()
 
 add_library(trainsim_core STATIC
-    src/config/Settings.cpp
     src/sim/Environment.cpp
     src/sim/PassengerSystem.cpp
     src/sim/Route.cpp
@@ -137,6 +136,13 @@ if(TRAINSIM_BUILD_GAME)
     set(CNA_ENGINE_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
     add_subdirectory("${TRAINSIM_CNA_ENGINE_ROOT}" cna_engine EXCLUDE_FROM_ALL)
 
+    # Preferences are cna-engine's SettingsFile, so they live beside the game rather than in the
+    # CNA-free core that TRAINSIM_BUILD_GAME=OFF builds.
+    add_library(trainsim_config STATIC src/config/Settings.cpp)
+    target_include_directories(trainsim_config PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_link_libraries(trainsim_config PUBLIC CnaEngine::Core PRIVATE trainsim_warnings)
+    target_include_directories(trainsim_config SYSTEM PRIVATE "${TRAINSIM_CNA_ENGINE_ROOT}/include")
+
     add_library(trainsim_render STATIC
         src/audio/TrainAudio.cpp
         src/render/BitmapFont.cpp
@@ -161,7 +167,7 @@ if(TRAINSIM_BUILD_GAME)
     add_executable(train-simulator
         src/app/Main.cpp
         src/app/TrainSimulatorGame.cpp)
-    target_link_libraries(train-simulator PRIVATE trainsim_core trainsim_render CNA trainsim_warnings)
+    target_link_libraries(train-simulator PRIVATE trainsim_core trainsim_config trainsim_render CNA trainsim_warnings)
     if(EMSCRIPTEN)
         set_target_properties(train-simulator PROPERTIES SUFFIX ".html")
         target_link_libraries(train-simulator PRIVATE CNA::EmscriptenAsyncify)
@@ -255,7 +261,6 @@ if(TRAINSIM_BUILD_TESTS)
         tests/PassengerSystemTests.cpp
         tests/RouteSimulationTests.cpp
         tests/ServiceIntegrationTests.cpp
-        tests/SettingsTests.cpp
         tests/StreamingWorldTests.cpp
         tests/TrainInteriorTests.cpp
         tests/TestMain.cpp)
@@ -285,8 +290,9 @@ if(TRAINSIM_BUILD_TESTS)
             tests/MeshBuilderTests.cpp
             tests/PixelGlyphTests.cpp
             tests/ProceduralMaterialsTests.cpp
+            tests/SettingsTests.cpp
             tests/TestMain.cpp)
-        target_link_libraries(trainsim_render_tests PRIVATE trainsim_render trainsim_warnings)
+        target_link_libraries(trainsim_render_tests PRIVATE trainsim_render trainsim_config trainsim_warnings)
         target_compile_definitions(trainsim_render_tests PRIVATE
             TRAINSIM_TEST_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets")
         add_test(NAME trainsim_render COMMAND trainsim_render_tests)

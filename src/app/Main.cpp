@@ -1,6 +1,8 @@
 #include "trainsim/app/TrainSimulatorGame.hpp"
 #include "trainsim/sim/Environment.hpp"
 
+#include "CnaEngine/Core/SettingsFile.hpp"
+
 #include <array>
 #include <cmath>
 #include <cstdlib>
@@ -62,11 +64,8 @@ fs::path discoverUserConfigFile()
 {
     fs::path local = fs::current_path() / "train-simulator.cfg";
     if (fs::is_regular_file(local)) return local;
-    if (const char* xdg = std::getenv("XDG_CONFIG_HOME"); xdg != nullptr && *xdg != '\0')
-        return fs::path(xdg) / "train-simulator" / "train-simulator.cfg";
-    if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0')
-        return fs::path(home) / ".config" / "train-simulator" / "train-simulator.cfg";
-    return local;
+    fs::path user = CnaEngine::UserConfigPath("train-simulator","train-simulator.cfg");
+    return user.empty() ? local : user;
 }
 
 } // namespace
