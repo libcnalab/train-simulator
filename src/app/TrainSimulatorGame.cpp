@@ -4,6 +4,8 @@
 #include "trainsim/sim/Environment.hpp"
 #include "trainsim/sim/TrainInterior.hpp"
 
+#include "CnaEngine/Graphics/ScreenCapture.hpp"
+
 #include "Microsoft/Xna/Framework/Color.hpp"
 #include "Microsoft/Xna/Framework/GameTime.hpp"
 #include "Microsoft/Xna/Framework/GameWindow.hpp"
@@ -2070,20 +2072,11 @@ void TrainSimulatorGame::drawUi()
 
 void TrainSimulatorGame::captureScreenshot(const std::string& path)
 {
-    auto& device = getGraphicsDeviceProperty();
-    const auto& viewport = device.getViewportProperty();
-    const int width = viewport.getWidthProperty();
-    const int height = viewport.getHeightProperty();
-    const std::size_t count = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
-    const Rectangle region(0, 0, width, height);
-    std::vector<std::uint8_t> rgba(count * 4);
-    // Use CNA's byte-oriented overload directly. Color is a polymorphic packed-vector type in
-    // CNA, so a full-HD vector of Color objects is substantially larger than the RGBA payload and
-    // requires a second conversion pass. The generic overload is the public exact-byte readback
-    // path and also keeps screenshot peak memory bounded during automated visual QA.
-    device.GetBackBufferData(&region, rgba.data(), 0, static_cast<int>(rgba.size()));
-    Texture2D screenshot = Texture2D::CreateFromPixels(device, width, height, rgba);
-    screenshot.SaveAsPng(path);
+    // cna-engine reads the back buffer as bytes (CNA's Color is a polymorphic packed-vector type
+    // four times their size), which keeps screenshot peak memory bounded during automated
+    // visual QA, and writes the PNG.
+    const auto capture = CnaEngine::Graphics::CaptureBackBuffer(getGraphicsDeviceProperty(), {.path = path});
+    if (!capture.success) throw std::runtime_error("Screenshot failed: " + capture.error);
     screenshotSaved_ = true;
 }
 
