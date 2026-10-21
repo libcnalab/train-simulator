@@ -113,6 +113,8 @@ int main(int argc, char** argv)
                 options.verticalSyncEnabled = false;
             else if (argument == "--variable-step")
                 options.fixedTimeStep = false;
+            else if (argument == "--lockstep")
+                options.lockstep = true;
             else if (argument == "--facade-control")
                 options.facadeLightingMode = 1;
             else if (argument == "--linear-facades")
@@ -216,7 +218,8 @@ int main(int argc, char** argv)
                 std::cout << "train-simulator [--frames N] [--run-seconds S] [--time-scale X] [--development-dwell] "
                              "[--debug-overlay] [--help-overlay] [--map-overlay] [--no-audio] "
                              "[--inspect-display] "
-                             "[--no-avatars] [--no-vsync] [--variable-step] [--facade-control|--linear-facades] "
+                             "[--no-avatars] [--no-vsync] [--variable-step] [--lockstep] "
+                             "[--facade-control|--linear-facades] "
                              "[--report-state] [--interaction-smoke] [--station 1-12] [--car 1-6] "
                              "[--route-km 0-286.4] [--direction -1|1] "
                              "[--quality 0-2] [--time HH:MM] "

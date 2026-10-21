@@ -48,6 +48,9 @@ struct LaunchOptions
     bool avatarRenderingEnabled = true;
     bool verticalSyncEnabled = true;
     bool fixedTimeStep = true;
+    // One 1/60 s step per drawn frame, however long the frame took, so the same arguments give
+    // the same pictures (fixed-step catch-up otherwise runs a timing-dependent number of steps).
+    bool lockstep = false;
     int facadeLightingMode = 0;
     bool reportState = false;
     bool interactionSmoke = false;
@@ -86,6 +89,8 @@ protected:
     void Draw(const Microsoft::Xna::Framework::GameTime& gameTime) override;
 
 private:
+    // Seconds one Update or Draw advances: the measured step, or the fixed one in lockstep.
+    [[nodiscard]] float stepSeconds(const Microsoft::Xna::Framework::GameTime& gameTime);
     [[nodiscard]] bool pressed(const Microsoft::Xna::Framework::Input::KeyboardState& now,
                                Microsoft::Xna::Framework::Input::Keys key) const;
     [[nodiscard]] bool playerInsideToilet() const noexcept;

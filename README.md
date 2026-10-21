@@ -409,6 +409,13 @@ preset. Without effective VSync it can run uncapped. Normal launches keep the fi
 `fixed_time_step` in final telemetry records the selected mode. A matched private GPU comparison
 still measured approximately 26 ms with either mode; switching did not fix synchronized pacing.
 
+`--lockstep` makes automated captures repeatable: every drawn frame follows exactly one 1/60 s
+simulation step, however long the frame took to draw. A fixed-step run otherwise catches up after
+a slow frame (the first one builds the world) with as many steps as the wall clock asks for, so
+passengers, rain, water and passing traffic differ between runs. With `--no-avatars` the same
+arguments then give the same picture on one machine and renderer; avatars still load
+asynchronously, and their animation advances with every frame drawn while they load.
+
 `--report-state` prints final route, direction, phase, speed, simulated service time, leg,
 loaded/generated streaming, population, active driver car, seat-walker, player-yield response,
 active/started station-exchange, offboard,

@@ -170,7 +170,9 @@ TrainSimulatorGame::TrainSimulatorGame(LaunchOptions options)
     graphics_.setSynchronizeWithVerticalRetraceProperty(options_.verticalSyncEnabled);
     getComponentsProperty().Add(new Microsoft::Xna::Framework::GamerServices::GamerServicesComponent(*this));
     setTargetElapsedTimeProperty(System::TimeSpan::FromTicks(166667));
-    setIsFixedTimeStepProperty(options_.fixedTimeStep);
+    // Lockstep uses CNA's variable-step loop for one Update per Draw; stepSeconds() then gives
+    // every step the fixed-step duration instead of the measured one.
+    setIsFixedTimeStepProperty(options_.fixedTimeStep && !options_.lockstep);
     showHelp_ = options_.startWithHelp;
     showMap_ = options_.startWithMap;
     inspectDisplay_ = options_.startWithDisplayInspection;
@@ -1312,10 +1314,16 @@ void TrainSimulatorGame::runInteractionSmoke()
     }
 }
 
+float TrainSimulatorGame::stepSeconds(const GameTime& gameTime)
+{
+    const auto& step = options_.lockstep ? getTargetElapsedTimeProperty()
+                                         : gameTime.getElapsedGameTimeProperty();
+    return std::clamp(static_cast<float>(step.getTotalSecondsProperty()),0.0f,0.10f);
+}
+
 void TrainSimulatorGame::Update(GameTime& gameTime)
 {
-    const float dt = std::clamp(static_cast<float>(gameTime.getElapsedGameTimeProperty().getTotalSecondsProperty()),
-                                0.0f, 0.10f);
+    const float dt = stepSeconds(gameTime);
     const KeyboardState keyboard = Keyboard::GetState();
     const MouseState mouse = Mouse::GetState();
 
@@ -2157,8 +2165,7 @@ void TrainSimulatorGame::Draw(const GameTime& gameTime)
                                              -0.0070f,0.0070f) * comfort;
         const float targetOffset = std::clamp(-signedAcceleration*0.014f,
                                                -0.012f,0.012f) * comfort;
-        const float renderSeconds = std::clamp(static_cast<float>(
-            gameTime.getElapsedGameTimeProperty().getTotalSecondsProperty()),0.0f,0.10f);
+        const float renderSeconds = stepSeconds(gameTime);
         const float response = 1.0f-std::exp(-renderSeconds*3.2f);
         cameraLongitudinalLean_ += (targetLean-cameraLongitudinalLean_)*response;
         cameraLongitudinalOffset_ += (targetOffset-cameraLongitudinalOffset_)*response;
