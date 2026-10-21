@@ -102,8 +102,8 @@ prove realism; only inspected engine screenshots do.
 ```bash
 export CCACHE_DIR=/rv/cnaccache CCACHE_BASEDIR=/rv
 cmake --build build --parallel 4                 # incremental; already configured
-./build/trainsim_render_tests                    # 200 render/geometry unit tests
-./build/trainsim_tests                           # 134 simulation unit tests
+./build/trainsim_render_tests                    # 209 render/geometry/settings unit tests
+./build/trainsim_tests                           # 126 simulation unit tests
 env LP_NUM_THREADS=4 ctest --test-dir build --parallel 1 --output-on-failure   # 75 tests; shared-host duration varies
 cmake --build build --parallel 4 --target trainsim_world_benchmark   # optional CPU window benchmark
 python3 tools/test_streaming_risks.py            # six moving GPU scenarios (wraps itself in the private display)
@@ -281,6 +281,27 @@ mid-way. The unmodified `develop` crashes the same way (`--run-seconds 120 --rou
 as quaternions and the translations linearly; poses outside a transition are unchanged, the 54
 views stay identical, three 180-second avatar runs at stations and on the line complete, and a
 render test checks that blended bones decompose.
+
+### Shared facilities (2026-10-21, branch `engine-shared`, cna-engine SHARE-001)
+
+Three more steps moved code the other simulators also wrote into cna-engine:
+
+| Step | Moved onto the engine | Stays the game's |
+| --- | --- | --- |
+| procedural textures | `Graphics::Image`: `ProceduralImage::downsampled`, `downsampledForAlphaTest` and `uploadMipmappedTexture` delegate to `Downsample`, `DownsampleForAlphaTest` and `UploadTexture` (the same truncating box filter and coverage bisection) | the texture generators, validation and messages |
+| preferences | `SettingsFile` reads and writes `train-simulator.cfg`; `UserConfigPath` finds the user file (now `%APPDATA%` on Windows) | strictness on top: a line without `=`, an unknown key or a non-finite value is still an error naming its line; of a key given twice only the last value is checked now |
+| automated runs | `AutomatedRunOptions`/`ParseAutomatedRunOption` (`--frames`, `--run-seconds`, `--screenshot`, `--lockstep`; a negative or non-finite value is refused) and `AutomatedRun` (simulated time, the frozen simulation at the limit, drawing on until the avatars are loaded, the screenshot read after Present) | the step length (`stepSeconds`, capped at 0.1 s), the elapsed service time, the start menu |
+
+`src/config/Settings.cpp` moved out of `trainsim_core` into a game-only `trainsim_config`, so the
+`TRAINSIM_BUILD_GAME=OFF` core stays CNA-free; `SettingsTests` run in `trainsim_render_tests`.
+cna-engine's image and settings probes compare the engine with frozen copies of the replaced code
+(`tests/fixtures/simulator_oracles`).
+
+Verification (Xvfb, llvmpipe, the 56 lockstep views as above): 54 pixel-identical to the views
+before the first step, the two onboard avatar views differing as they did between runs before;
+every `--report-state` counter equal except `terminal-platform`'s route-point cache counts, which
+equal the original game's GPU run and so vary between runs of the original too. Unit binaries 126
+and 209 (the eight settings tests moved); CTest 73 of 75 with the same two failures as above.
 
 ## Known open issues (outside the ranked list)
 
